@@ -208,6 +208,41 @@ function getWorkerBase(){
 function setTemasStatus(msg){ const el = document.getElementById('temasStatus'); if(el) el.textContent = msg; }
 function updateSelCount(){ const el = document.getElementById('selCount'); if(el) el.textContent = `Seleccionados: ${SELECCION.size}`; }
 
+// ---- Utilidades fetch con reintentos y caché ----
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
+async function fetchJSONWithRetry(url, {retries=3, baseDelay=400} = {}){
+  let attempt = 0;
+  let lastErr = null;
+  while (attempt <= retries){
+    try{
+      const res = await fetch(url, { method:'GET', cache:'no-store' });
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    }catch(e){
+      lastErr = e;
+      if (attempt === retries) break;
+      const jitter = Math.random()*120;
+      await sleep(baseDelay * Math.pow(2, attempt) + jitter); // 0.4s, 0.8s, 1.6s...
+      attempt++;
+    }
+  }
+  throw lastErr || new Error('Network error');
+}
+
+function saveTemasCache(base, items){
+  try{ localStorage.setItem('temas_cache_'+base, JSON.stringify({ts:Date.now(), items})); }catch{}
+}
+
+function loadTemasCache(base){
+  try{
+    const raw = localStorage.getItem('temas_cache_'+base);
+    if(!raw) return null;
+    const obj = JSON.parse(raw);
+    return obj?.items || null;
+  }catch{ return null; }
+}
+
 async function listarTemas(auto=false){
   const base = getWorkerBase();
   if(!base){
@@ -215,22 +250,38 @@ async function listarTemas(auto=false){
     if(!auto) alert('Indica la URL del Worker (se guarda localmente).');
     return;
   }
-  setTemasStatus('Cargando…');
+
+  // 1) Pinta inmediatamente lo último cacheado (si existe)
+  const cached = loadTemasCache(base);
+  if (cached && cached.length){
+    TEMAS = cached;
+    renderTemas();
+    setTemasStatus(`(caché) Temas: ${TEMAS.length}`);
+  } else {
+    setTemasStatus('Cargando…');
+  }
+
+  // 2) Lanza la carga “real” con reintentos
   try{
-    const res = await fetch(base + '/temas', { method:'GET' });
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const data = await res.json();
-    TEMAS = Array.isArray(data.items) ? data.items : [];
+    const data = await fetchJSONWithRetry(base + '/temas', {retries: 3, baseDelay: 350});
+    const items = Array.isArray(data.items) ? data.items : [];
+    TEMAS = items;
     renderTemas();
     setTemasStatus(`Temas: ${TEMAS.length}`);
-    // Guarda workerBase
+    saveTemasCache(base, items);
     try{ localStorage.setItem('worker_base', base); }catch{}
   }catch(e){
-    console.error(e);
-    setTemasStatus('Error al cargar');
-    alert('No se pudieron listar temas. Revisa la URL del Worker y CORS.');
+    console.warn('Fallo cargando /temas:', e);
+    if (cached && cached.length){
+      setTemasStatus(`Usando caché (${cached.length})`);
+      // no alert si tenemos algo que mostrar
+    } else {
+      setTemasStatus('Error al cargar');
+      if(!auto) alert('No se pudieron listar temas (intenta de nuevo).');
+    }
   }
 }
+
 
 function renderTemas(){
   const wrap = document.getElementById('temasArea');
