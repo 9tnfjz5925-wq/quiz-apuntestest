@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quiz desde apuntes + IA (BYO-API)</title>
+<style>
+  :root{
+    --bg:#0b0f19; --card:#121829; --muted:#8aa0b4; --accent:#5fd3a1; --warn:#ffcc66; --text:#eef2f8;
+    --border:#1e2a3f; --danger:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; background:var(--bg); color:var(--text);}
+  header{padding:18px 20px; border-bottom:1px solid var(--border); background:linear-gradient(180deg,#0c1222,#0a0e18)}
+  h1{font-size:20px;margin:0 0 6px 0}
+  .sub{color:var(--muted); font-size:13px}
+  main{display:grid; grid-template-columns: 1.25fr 1fr; gap:16px; padding:16px; align-items:start}
+  .panel{background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px; box-shadow:0 8px 30px rgba(0,0,0,.25)}
+  .panel h2{font-size:16px; margin:0 0 10px 0}
+  textarea{width:100%; height:220px; background:#0a1020; color:var(--text); border:1px solid var(--border); border-radius:12px; padding:10px; font-size:14px; resize:vertical}
+  label{font-size:13px; color:var(--muted)}
+  input[type="number"], input[type="text"], input[type="password"], select{background:#0a1020; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px; font-size:14px}
+  button{background:var(--accent); color:#0a1120; border:0; padding:10px 12px; border-radius:12px; font-weight:600; cursor:pointer}
+  button.secondary{background:#1d2b45; color:var(--text);}
+  button.warn{background:var(--warn); color:#111}
+  .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+  .qcard{background:#0a1020; border:1px solid var(--border); border-radius:14px; padding:12px; margin:10px 0}
+  .muted{color:var(--muted); font-size:12px}
+  .pill{display:inline-block; padding:2px 8px; border:1px solid var(--border); border-radius:999px; font-size:12px; color:var(--muted);}
+  .choices{display:grid; gap:8px; margin-top:10px}
+  .choice{padding:10px; border:1px solid var(--border); border-radius:10px; cursor:pointer; background:#0e152a}
+  .choice.correct{border-color:#5fd3a1}
+  .choice.wrong{border-color:var(--danger)}
+  .flex{display:flex; justify-content:space-between; align-items:center}
+  .tag{font-size:11px; color:#9fb2c7; border:1px solid var(--border); padding:2px 6px; border-radius:8px}
+  .small{font-size:12px}
+  .hint{background:#0e152a; border:1px dashed var(--border); border-radius:10px; padding:8px; margin-top:8px; color:#c8d4e3}
+  .footer{padding:12px 16px; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:12px}
+  .inline{display:inline-flex; gap:8px; align-items:center}
+  .kbd{background:#11182b; border:1px solid var(--border); border-radius:6px; padding:2px 6px; font-size:12px}
+  .danger{color:var(--danger)}
+  @media (max-width: 980px){ main{grid-template-columns:1fr;}; }
+  code{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:12px; color:#dbe8f5}
+</style>
+</head>
+<body>
+<header>
+  <h1>Quiz desde apuntes + IA (bring-your-own API)</h1>
+  <div class="sub">Dos modos: 100% local (heurístico) o IA vía API (si introduces tu clave). Tus notas no se suben en modo local.</div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>1) Selecciona temas (desde tu repositorio via Cloudflare)</h2>
+  
+    <div class="grid2">
+      <div>
+        <label>URL del Worker (se guarda localmente)</label>
+        <input type="text" id="workerBase" placeholder="https://TU-WORKER.workers.dev">
+      </div>
+      <div>
+        <label>Filtro rápido</label>
+        <input type="text" id="temaFilter" placeholder="Filtrar por nombre...">
+      </div>
+    </div>
+  
+    <div class="row" style="margin-top:8px">
+      <button class="secondary" id="btnRefrescarTemas">Refrescar</button>
+      <button class="secondary warn" id="btnVaciarSeleccion">Vaciar selección</button>
+      <span id="selCount" class="pill">Seleccionados: 0</span>
+      <span id="temasStatus" class="pill">Cargando…</span>
+    </div>
+  
+    <div id="temasArea" style="max-height:260px; overflow:auto; margin-top:8px; border:1px solid var(--border); border-radius:10px; padding:8px"></div>
+  
+    <div class="row" style="margin-top:10px">
+      <label>Máx. preguntas a generar:</label>
+      <input type="number" id="maxQs" min="5" max="200" value="30">
+      <button id="generateAI">Generar con IA (API)</button>
+      <span class="muted">⚠️ Usa el proxy del Worker si no quieres exponer tu key en el cliente.</span>
+    </div>
+  
+    <div class="hint" style="margin-top:10px">
+      <b>Cómo funciona</b>: esta lista la trae <code>/temas</code> de tu Worker. Marca 1 o varios temas y pulsa “Generar con IA”. No hace falta pegar texto.
+    </div>
+  </section>  
+
+  <section class="panel">
+    <h2>2) Configuración</h2>
+    <div class="grid2">
+        <label>Dificultad</label>
+        <select id="difficulty">
+          <option value="auto">Auto (equilibrado)</option>
+          <option value="easy">Fácil</option>
+          <option value="medium">Media</option>
+          <option value="hard">Difícil</option>
+        </select>
+      </div>
+      <div>
+        <label>Formato exportación</label>
+        <select id="exportFmt">
+          <option value="csv">CSV (Excel)</option>
+          <option value="anki">Anki (CSV front;back)</option>
+          <option value="remnote">RemNote (Markdown)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <button id="startQuiz">Empezar Quiz</button>
+      <button class="secondary" id="reviewWrong">Revisar fallos</button>
+      <button class="secondary" id="exportDeck">Exportar</button>
+    </div>
+    <div class="muted" style="margin-top:8px">Tip: genera por epígrafe → exporta → repasa con espaciado.</div>
+  </section>
+
+  <section class="panel" style="grid-column:1 / -1">
+    <div class="flex">
+      <h2>3) Ejercicio</h2>
+      <div class="inline">
+        <span id="progress" class="pill">0/0</span>
+        <span id="score" class="pill">Puntuación: 0</span>
+        <span id="due" class="pill">Pendientes hoy: 0</span>
+        <span id="status" class="pill">Listo</span>
+      </div>
+    </div>
+    <div id="quizArea"></div>
+    <div class="footer">
+      <div class="inline">
+        <span class="small muted">Atajos: <span class="kbd">1–5</span> responde | <span class="kbd">N</span> siguiente</span>
+      </div>
+      <div class="inline">
+        <button class="secondary" id="prevQ">⟵ Anterior</button>
+        <button id="nextQ">Siguiente ⟶</button>
+      </div>
+    </div>
+
+    <details class="hint" style="margin-top:10px">
+      <summary>Formato JSON esperado de la IA</summary>
+      <pre><code>{
+  "questions":[
+    {"type":"mcq","question":"...","choices":["A","B","C","D"],"answer":"C","explanation":"...","source_quote":"..."},
+  ]
+}</code></pre>
+    </details>
+  </section>
+</main>
+
+<script>
+/* ---------- Utilidades ---------- */
+const stopwords = new Set(`a,al,algo,algunas,algunos,ante,antes,como,con,contra,cuando,De,de,del,desde,donde,durante,e,el,ella,ellas,ellos,em,bajo,hasta,la,las,lo,los,mas,más,me,mi,mí,mientras,mis,mi,mis,modo,muy,ni,no,nos,nuestro,nosotros,o,os,otra,otros,para,pero,por,porque,que,qué,quien,quién,se,sin,sobre,su,sus,te,tu,tú,tus,un,una,uno,unos,unas,ya,si,sí,ser,son,es,esta,este,esto,estas,estos,ha,han,hay,fue,eran,será,serán,también,entre,mediante,según,cada,debido`.split(',').map(s=>s.trim()));
+function seedRandom(seed){ let s = seed % 2147483647; if (s<=0) s+=2147483646; return ()=> (s = s*16807 % 2147483647)/2147483647; }
+function shuffle(arr, rnd=Math.random){ for(let i=arr.length-1;i>0;i--){ const j = Math.floor(rnd()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]];} return arr;}
+function splitSentences(text){
+  return text.replace(/\s+/g,' ').split(/(?<=[\.\?\!;:])\s+(?=[A-ZÁÉÍÓÚÑ0-9¡¿“"(\[])/g).map(s=>s.trim()).filter(s=>s.length>0);
+}
+function tokenize(s){
+  return s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(w=>w && !stopwords.has(w) && w.length>2 && !/^\d+$/.test(w));
+}
+function topTerms(text, k=50){
+  const freq = new Map(); const words = tokenize(text);
+  for(const w of words){ freq.set(w,(freq.get(w)||0)+1); }
+  const entries = [...freq.entries()].sort((a,b)=>b[1]-a[1]);
+  return entries.slice(0,k).map(([w,c])=>w);
+}
+function sentenceScore(sent, keyset){
+  const toks = tokenize(sent); let c=0; for(const t of toks){ if(keyset.has(t)) c++; } return c + Math.min(2, Math.floor(sent.length/120));
+}
+function pickN(arr, n, rnd=Math.random){ arr = arr.slice(); shuffle(arr, rnd); return arr.slice(0,n); }
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function setStatus(msg){ document.getElementById('status').textContent = msg; }
+
+/* ---------- Estado ---------- */
+let QUESTIONS = [];
+let CURRENT = 0;
+let SCORE = 0;
+let CORRECT = 0;
+let INCORRECT = 0;
+let RNG = Math.random;
+let WRONG = new Set();
+let SRS = {}; // id -> {interval, due}
+const DFLT_INTERVALS = [1,3,7,14,30];
+
+function saveState(){
+  localStorage.setItem('quiz_wrong', JSON.stringify([...WRONG]));
+  localStorage.setItem('quiz_srs', JSON.stringify(SRS));
+  
+}
+function loadState(){
+  const s = localStorage.getItem('quiz_srs'); if(s){ SRS = JSON.parse(s); }
+  const w = localStorage.getItem('quiz_wrong');
+    if (w) { try { WRONG = new Set(JSON.parse(w)); } catch(e){} }
+
+  updateDueBadge();
+}
+
+// ====== Selección de temas vía Cloudflare ======
+let TEMAS = [];                // [{key, name, group}]
+let SELECCION = new Set();     // keys seleccionadas (p.ej. "GrupoII/GII T01 ....pdf")
+
+function getWorkerBase(){
+  let base = (document.getElementById('workerBase')?.value || '').trim();
+  if (base.endsWith('/')) base = base.slice(0,-1);
+  return base;
+}
+
+function setTemasStatus(msg){ const el = document.getElementById('temasStatus'); if(el) el.textContent = msg; }
+function updateSelCount(){ const el = document.getElementById('selCount'); if(el) el.textContent = `Seleccionados: ${SELECCION.size}`; }
+
+async function listarTemas(auto=false){
+  const base = getWorkerBase();
+  if(!base){
+    setTemasStatus('Falta URL del Worker');
+    if(!auto) alert('Indica la URL del Worker (se guarda localmente).');
+    return;
+  }
+  setTemasStatus('Cargando…');
+  try{
+    const res = await fetch(base + '/temas', { method:'GET' });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data = await res.json();
+    TEMAS = Array.isArray(data.items) ? data.items : [];
+    renderTemas();
+    setTemasStatus(`Temas: ${TEMAS.length}`);
+    // Guarda workerBase
+    try{ localStorage.setItem('worker_base', base); }catch{}
+  }catch(e){
+    console.error(e);
+    setTemasStatus('Error al cargar');
+    alert('No se pudieron listar temas. Revisa la URL del Worker y CORS.');
+  }
+}
+
+function renderTemas(){
+  const wrap = document.getElementById('temasArea');
+  const filtro = (document.getElementById('temaFilter')?.value || '').toLowerCase();
+  wrap.innerHTML = '';
+
+  if(!TEMAS.length){
+    wrap.innerHTML = '<div class="muted small">No hay temas (¿carpetas GrupoII/GrupoIV vacías?).</div>';
+    return;
+  }
+
+  const list = document.createElement('div');
+  for(const it of TEMAS){
+    const label = `${it.group} • ${it.name}`;
+    if (filtro && !label.toLowerCase().includes(filtro)) continue;
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.margin = '4px 0';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = SELECCION.has(it.key);
+    cb.addEventListener('change', ()=>{
+      if(cb.checked) SELECCION.add(it.key);
+      else SELECCION.delete(it.key);
+      updateSelCount();
+    });
+
+    const sp = document.createElement('span');
+    sp.textContent = label;
+    sp.className = 'small';
+
+    row.appendChild(cb);
+    row.appendChild(sp);
+    list.appendChild(row);
+  }
+
+  wrap.appendChild(list);
+  updateSelCount();
+}
+
+// Descarga texto plano del tema (usa /texto del Worker)
+async function fetchTextoTema(key){
+  const base = getWorkerBase();
+  if(!base) throw new Error('Falta URL del Worker');
+  const url = `${base}/texto?key=${encodeURIComponent(key)}`;
+  const res = await fetch(url, { method:'GET' });
+  if(!res.ok){
+    throw new Error(`HTTP ${res.status} al obtener ${key}. Asegúrate de que existe Texto/${key.replace(/\.pdf$/i,'.txt')} en GitHub.`);
+  }
+  return res.text();
+}
+
+// Inicializa: carga workerBase guardado, auto-lista, y listeners
+function initTemasUI(){
+  try{
+    const saved = localStorage.getItem('worker_base');
+    if(saved && document.getElementById('workerBase')){
+      document.getElementById('workerBase').value = saved;
+    }
+  }catch{}
+
+  // Auto listar en carga (si hay URL guardada)
+  listarTemas(true);
+
+  // Listeners
+  const filtro = document.getElementById('temaFilter');
+  if (filtro) filtro.addEventListener('input', renderTemas);
+
+  const refrescar = document.getElementById('btnRefrescarTemas');
+  if (refrescar) refrescar.addEventListener('click', ()=> listarTemas(false));
+
+  const vaciar = document.getElementById('btnVaciarSeleccion');
+  if (vaciar) vaciar.addEventListener('click', ()=>{ SELECCION.clear(); renderTemas(); });
+}
+
+document.addEventListener('DOMContentLoaded', initTemasUI);
+
+/* ---------- Generación con IA ---------- */
+async function generateAI(){
+  // --- NUEVO: trabajar solo con selección de temas ---
+  if (SELECCION.size === 0) {
+    alert("Selecciona al menos un tema.");
+    return;
+  }
+
+  // Usaremos SIEMPRE el Worker como endpoint IA
+  const workerBase = getWorkerBase();
+  if (!workerBase){
+    alert("Indica la URL del Worker arriba.");
+    return;
+  }
+  const endpoint = workerBase;    // ← tu Worker hace de proxy de Gemini
+  const maxQs = parseInt(document.getElementById('maxQs').value,10)||30;
+  const perCall = 12;             // o ajusta si quieres (valor fijo)
+  setStatus('IA: preparando…');
+
+
+  // Descarga los textos de los temas seleccionados y combínalos
+  const keys = [...SELECCION];
+  let combinado = '';
+  try{
+    const textos = await Promise.all(keys.map(k => fetchTextoTema(k).catch(e => `[ERROR ${k}]: ${e.message}`)));
+    combinado = keys.map((k,i)=> `===== ${k} =====\n${(textos[i]||'').trim()}`).join('\n\n');
+  }catch(e){
+    console.error(e);
+    alert('Error descargando textos de los temas: ' + e.message);
+    return;
+  }
+
+  // Usa el texto combinado como fuente para chunking
+  const chunks = chunkText(combinado, 2800);
+  const allowed = ['mcq'];
+  const difficulty = document.getElementById('difficulty').value;
+
+  const out = [];
+  for(let i=0;i<chunks.length;i++){
+    if(out.length>=maxQs) break;
+    const need = Math.min(perCall, maxQs - out.length);
+    setStatus(`IA: generando (${i+1}/${chunks.length})...`);
+    try{
+      const qs = await callChatJSON(endpoint, null, null, buildPrompt(chunks[i], need, allowed, difficulty));
+      for(const q of qs){
+        if(q.type !== 'mcq' || !q.choices) continue;
+        const id = 'ai_'+(out.length+1);
+        out.push({
+          id,
+          type:'mcq',
+          stem:q.question,
+          sent:q.source_quote||'',
+          answer:q.answer,
+          choices:q.choices,
+          explanation:q.explanation||''
+        });
+        if(out.length>=maxQs) break;
+      }
+    } catch(e){
+      console.error(e);
+      alert("Error llamando a la IA: "+e.message);
+      break;
+    }
+  }
+
+  if(out.length===0){ setStatus('IA: sin resultados'); return; }
+
+  // Reset tanda y pinta
+  QUESTIONS = out;
+  CURRENT = 0; SCORE = 0; WRONG.clear();
+  CORRECT = 0; INCORRECT = 0;
+  const next = document.getElementById('nextQ'); if(next) next.disabled = false;
+
+  updateUI();
+  saveState();
+  setStatus('IA: listo');
+}
+
+function buildPrompt(text, n, _types, difficulty){
+  const mapDiff = {easy:'básico', medium:'medio', hard:'difícil', auto:'equilibrado'};
+  return [
+    { "role":"system", "content":
+      "Eres un generador de preguntas tipo test (opción múltiple) para una oposición española. Crea preguntas rigurosas en español con distractores verosímiles basadas en el texto dado. Devuelve estrictamente JSON válido conforme al esquema."
+    },
+    { "role":"user", "content":
+`Texto base:
+"""${text}"""
+
+Genera EXACTAMENTE ${n} preguntas de opción múltiple (MCQ) de dificultad ${mapDiff[difficulty]||'equilibrado'}.
+
+Reglas:
+- 4 opciones (A–D), 1 correcta y 3 distractores plausibles y no triviales.
+- DEVUELVE "answer" como TEXTO EXACTO de la opción correcta (no letras).
+- Añade "explanation" breve y "source_quote" (≤30 palabras) del texto.
+
+Devuelve SOLO JSON con este esquema:
+{
+  "questions":[
+    {"type":"mcq","question":"...","choices":["Opción A","Opción B","Opción C","Opción D"],"answer":"Texto exacto de la opción correcta","explanation":"...","source_quote":"..."}
+  ]
+}` }
+  ];
+}
+
+
+function chunkText(text, targetChars){
+  const parts = [];
+  let buf = [];
+  let len = 0;
+  const sents = splitSentences(text);
+  for(const s of sents){
+    if(len + s.length > targetChars && buf.length){
+      parts.push(buf.join(' '));
+      buf = [s];
+      len = s.length;
+    } else {
+      buf.push(s);
+      len += s.length;
+    }
+  }
+  if(buf.length) parts.push(buf.join(' '));
+  return parts;
+}
+
+async function callChatJSON(endpoint, _apiKey, model, messages){
+  // El Worker ignora "model"; recibe {messages} y devuelve estilo OpenAI
+  const body = {
+    model: model || "gemini-2.5-flash",
+    messages,
+    temperature: 0.2,
+    response_format: {"type":"json_object"}
+  };
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, // ← sin Authorization
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    const txt = await res.text().catch(()=> '');
+    throw new Error(`HTTP ${res.status}: ${txt.slice(0,200)}`);
+  }
+  const data = await res.json();
+  let content = null;
+  if(data.choices && data.choices[0]?.message?.content){
+    content = data.choices[0].message.content;
+  } else if(data.output_text){
+    content = data.output_text;
+  } else if(data.choices && data.choices[0]?.message?.parsed){
+    return data.choices[0].message.parsed.questions || [];
+  }
+  try{
+    const obj = JSON.parse(content);
+    return obj.questions || [];
+  } catch(e){
+    const match = content && content.match(/\{[\s\S]*\}/);
+    if(match){
+      try{
+        const obj = JSON.parse(match[0]);
+        return obj.questions || [];
+      } catch(e2){}
+    }
+    throw new Error('La IA no devolvió JSON válido.');
+  }
+}
+
+
+/* ---------- UI Quiz ---------- */
+function updateUI(){
+  document.getElementById('progress').textContent = `${QUESTIONS.length?CURRENT+1:0}/${QUESTIONS.length}`;
+  document.getElementById('score').textContent = `Puntuación: ${SCORE}`;
+  renderCurrent();
+  updateDueBadge();
+}
+
+function renderCurrent(){
+  const area = document.getElementById('quizArea');
+  area.innerHTML = '';
+  if(QUESTIONS.length===0){
+    area.innerHTML = '<div class="muted">Genera preguntas para empezar.</div>'; return;
+  }
+  const q = QUESTIONS[CURRENT];
+  const card = document.createElement('div'); card.className='qcard';
+  const header = document.createElement('div'); header.className='flex';
+  header.innerHTML = `<div><span class="tag">MCQ</span></div><div class="muted small">Ítem ${CURRENT+1}</div>`;
+  const stem = document.createElement('div'); stem.style.marginTop='8px'; stem.textContent = q.stem || q.question || '';
+  card.appendChild(header); card.appendChild(stem);
+
+  // Solo MCQ
+  const div = document.createElement('div'); div.className='choices';
+  q.choices.forEach((c,idx)=>{
+    const btn = document.createElement('div'); btn.className='choice'; btn.textContent = (idx+1)+') '+c;
+    btn.addEventListener('click', ()=>answerMCQ(btn, c, q));
+    div.appendChild(btn);
+  });
+  card.appendChild(div);
+
+  if(q.explanation){
+    const exp = document.createElement('div'); exp.className='muted small'; exp.style.marginTop='8px';
+    exp.textContent = 'Explicación: ' + q.explanation;
+    card.appendChild(exp);
+  }
+  if(q.sent){
+    const src = document.createElement('div'); src.className='muted small'; src.style.marginTop='4px';
+    src.textContent = 'Fuente: ' + q.sent;
+    card.appendChild(src);
+  }
+
+  area.appendChild(card);
+}
+
+// Convierte "A/B/C/D" o "1/2/3/4" al texto real de la opción.
+// Si ya es texto, lo deja igual.
+function getCorrectText(q){
+  const choices = (q.choices||[]).map(c => String(c).trim());
+  let a = String(q.answer||'').trim();
+
+  // Limpieza rápida
+  a = a.replace(/^respuesta\s*[:\-]\s*/i,'')
+       .replace(/^correcta\s*[:\-]\s*/i,'')
+       .replace(/^opci[oó]n\s*/i,'')
+       .replace(/^[-–—]\s*/,'')
+       .replace(/[“”"']/g,'')
+       .trim();
+
+  // A, B, C, D
+  const L = a.match(/^[A-D](?=[).:\s]|$)/i);
+  if(L){ const idx = {A:0,B:1,C:2,D:3}[L[0].toUpperCase()]; return choices[idx] ?? a; }
+
+  // 1,2,3,4
+  const N = a.match(/^[1-4](?=[).:\s]|$)/);
+  if(N){ const idx = parseInt(N[0],10)-1; return choices[idx] ?? a; }
+
+  // "B) París" → "París"
+  const pref = a.replace(/^[A-D][).:\-\s]+/i,'').trim();
+  if (choices.includes(pref)) return pref;
+
+  // Igual exacta por texto
+  const found = choices.find(c => c.toLowerCase() === a.toLowerCase());
+  return found || a;
+}
+
+function answerMCQ(btn, choice, q){
+  if (q.answered) return; // ← evita puntuar dos veces
+  q.answered = true;
+
+  const btns = [...btn.parentElement.children];
+  btns.forEach(el => el.classList.add('wrong'));
+
+  const gold = getCorrectText(q); // texto real de la opción correcta
+  const correct = btns.find(el => el.textContent.slice(3).trim() === gold);
+
+  if (correct){
+    correct.classList.remove('wrong');
+    correct.classList.add('correct');
+  }
+
+  if (choice === gold){
+    // ✅ Respuesta correcta → +1
+    if (typeof SCORE !== 'number') SCORE = 0;
+    SCORE += 1;
+    CORRECT += 1;
+    WRONG.delete(q.id);
+    promoteSRS(q.id);
+  } else {
+    // ❌ Respuesta incorrecta → −1/3
+    if (typeof SCORE !== 'number') SCORE = 0;
+    SCORE -= 1/3;
+    INCORRECT += 1;
+    WRONG.add(q.id);
+    resetSRS(q.id);
+  }
+
+    // Bloquea más clics en las opciones
+  btns.forEach(el => el.style.pointerEvents = 'none');
+
+  const scoreEl = document.getElementById('score');
+  if (scoreEl) scoreEl.textContent = `Puntuación: ${SCORE.toFixed(2)}`;
+
+  saveState();
+}
+
+function normalize(s){ return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim(); }
+function answerCloze(val, q){
+  const user = normalize(val).split(',').map(x=>x.trim()).filter(Boolean);
+  const gold = normalize(q.answer).split(',').map(x=>x.trim());
+  const ok = gold.every(g=> user.some(u=>u===g));
+  if(ok){
+    SCORE += 1; WRONG.delete(q.id); promoteSRS(q.id);
+    alert('✅ Correcto');
+  } else {
+    WRONG.add(q.id); resetSRS(q.id);
+    alert(`❌ Incorrecto. Respuesta: ${q.answer}`);
+  }
+  document.getElementById('score').textContent = `Puntuación: ${SCORE}`;
+}
+
+function nextQ(){
+  if(QUESTIONS.length===0) return;
+
+  if (CURRENT >= QUESTIONS.length - 1){
+    // Ya estás en la última → muestra resultados y no sigas
+    showResults();
+    return;
+  }
+
+  CURRENT = Math.min(QUESTIONS.length-1, CURRENT+1);
+  updateUI();
+  saveState();
+}
+
+function prevQ(){
+  if (CURRENT > 0){ CURRENT -= 1; updateUI(); saveState(); }
+}
+
+function showResults(){
+  const total = QUESTIONS.length;
+  const net = SCORE; // ya incluye +1 / -1/3
+  const sobre10 = Math.max(0, (net / total) * 10); // nota en 0–10 (sin negativos)
+
+  alert(
+    `🏁 Fin de la batería\n\n` +
+    `✔️ Aciertos: ${CORRECT}\n` +
+    `❌ Fallos:   ${INCORRECT}\n` +
+    `📊 Puntuación neta: ${net.toFixed(2)} / ${total}\n` +
+    `📝 Nota (0–10): ${sobre10.toFixed(2)}`
+  );
+
+  // Deshabilita el botón "Siguiente"
+  const next = document.getElementById('nextQ');
+  if (next) next.disabled = true;
+
+  // (Opcional) Ofrece pasar directamente a "Revisar fallos"
+  // document.getElementById('reviewWrong').click();
+}
+
+/* ---------- SRS sencillo ---------- */
+function promoteSRS(id){
+  const now = todayISO();
+  const rec = SRS[id] || {intervalIdx:0, due: now};
+  rec.intervalIdx = Math.min(DFLT_INTERVALS.length-1, rec.intervalIdx+1);
+  const days = DFLT_INTERVALS[rec.intervalIdx];
+  const due = new Date(); due.setDate(due.getDate()+days);
+  rec.due = due.toISOString().slice(0,10);
+  SRS[id] = rec; saveState(); updateDueBadge();
+}
+function resetSRS(id){
+  const now = todayISO();
+  SRS[id] = {intervalIdx:0, due: now}; saveState(); updateDueBadge();
+}
+function updateDueBadge(){
+  const today = todayISO();
+  let due = 0;
+  for(const id in SRS){ if(SRS[id].due <= today) due++; }
+  document.getElementById('due').textContent = `Pendientes hoy: ${due}`;
+}
+
+/* ---------- Exportación ---------- */
+function exportDeck(){
+  if(QUESTIONS.length===0){ alert('Nada que exportar.'); return; }
+  const fmt = document.getElementById('exportFmt').value;
+  let out = '';
+  if(fmt==='csv'){
+    out = 'tipo,pregunta,respuesta,frase\n';
+    for(const q of QUESTIONS){
+      const stem = q.stem || q.question || '';
+      out += `"${q.type}","${(stem).replace(/"/g,'""')}","${(q.answer||'').replace(/"/g,'""')}","${(q.sent||'').replace(/"/g,'""')}"\n`;
+    }
+    download('quiz_export.csv', out);
+  } else if(fmt==='anki'){
+    for(const q of QUESTIONS){
+      const stem = q.stem || q.question || '';
+      out += `${escapeTabs(stem)}\t${escapeTabs(q.answer||q.sent||'')}\n`;
+    }
+    download('quiz_anki.tsv', out);
+  } else {
+    for(const q of QUESTIONS){
+      const stem = q.stem || q.question || '';
+      out += `- **${stem}**\n  - ${q.answer||q.sent||''}\n\n`;
+    }
+    download('quiz_remnote.md', out);
+  }
+}
+function escapeTabs(s){ return (s||'').replace(/\t/g,' ').replace(/\n/g,'<br>'); }
+function download(filename, text){
+  const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(()=> URL.revokeObjectURL(url), 500);
+}
+
+/* ---------- Control ---------- */
+// --- Cloudflare Temas: listeners ---
+document.getElementById('btnRefrescarTemas').addEventListener('click', ()=> listarTemas(false));
+document.getElementById('btnVaciarSeleccion').addEventListener('click', ()=>{ SELECCION.clear(); renderTemas(); });
+document.getElementById('temaFilter').addEventListener('input', renderTemas);
+
+document.getElementById('generateAI').addEventListener('click', generateAI);
+
+document.getElementById('startQuiz').addEventListener('click', ()=>{
+  CURRENT = 0; SCORE = 0; WRONG.clear();
+  CORRECT = 0; INCORRECT = 0;
+  const next = document.getElementById('nextQ'); if(next) next.disabled = false;
+  updateUI();
+});
+document.getElementById('nextQ').addEventListener('click', nextQ);
+document.getElementById('prevQ').addEventListener('click', prevQ);
+
+document.getElementById('reviewWrong').addEventListener('click', ()=>{
+  if(WRONG.size===0){ alert('No hay fallos acumulados.'); return; }
+  const ids = new Set(WRONG);
+  QUESTIONS = QUESTIONS.filter(q=>ids.has(q.id));
+  CURRENT = 0; updateUI();
+});
+document.getElementById('exportDeck').addEventListener('click', exportDeck);
+
+document.addEventListener('keydown', (e)=>{
+  if(e.key>='1' && e.key<='5'){
+    const n = parseInt(e.key,10);
+    const area = document.querySelector('.choices');
+    if(area){ const btn = area.children[n-1]; if(btn) btn.click(); }
+  } else if(e.key==='n' || e.key==='N'){ nextQ(); }
+});
+
+// init
+loadState(); updateUI();
+</script>
+</body>
+</html>
