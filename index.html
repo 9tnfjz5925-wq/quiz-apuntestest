@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Quiz desde apuntes + IA (BYO-API)</title>
+<title>GonchiTest</title>
 <style>
   :root{
     --bg:#0b0f19; --card:#121829; --muted:#8aa0b4; --accent:#5fd3a1; --warn:#ffcc66; --text:#eef2f8;
@@ -46,8 +46,8 @@
 </head>
 <body>
 <header>
-  <h1>Quiz desde apuntes + IA (bring-your-own API)</h1>
-  <div class="sub">Dos modos: 100% local (heurístico) o IA vía API (si introduces tu clave). Tus notas no se suben en modo local.</div>
+  <h1>GonchiTest</h1>
+  <div class="sub">Crea test a partir de los temas en pdf conectandose a una IA</div>
 </header>
 
 <main>
@@ -71,6 +71,8 @@
       <span id="selCount" class="pill">Seleccionados: 0</span>
       <span id="temasStatus" class="pill">Cargando…</span>
     </div>
+
+    <div class="row" style="margin-top:6px; flex-wrap:wrap; gap:6px" id="groupControls"></div>
   
     <div id="temasArea" style="max-height:260px; overflow:auto; margin-top:8px; border:1px solid var(--border); border-radius:10px; padding:8px"></div>
   
@@ -82,38 +84,48 @@
     </div>
   
     <div class="hint" style="margin-top:10px">
-      <b>Cómo funciona</b>: esta lista la trae <code>/temas</code> de tu Worker. Marca 1 o varios temas y pulsa “Generar con IA”. No hace falta pegar texto.
+      <b>Cómo funciona</b>: esta lista la trae <code>/temas</code> de tu Worker. Marca 1 o varios temas y pulsa “Generar con IA”.
     </div>
   </section>  
 
   <section class="panel">
-    <h2>2) Configuración</h2>
-    <div class="grid2">
-        <label>Dificultad</label>
-        <select id="difficulty">
-          <option value="auto">Auto (equilibrado)</option>
-          <option value="easy">Fácil</option>
-          <option value="medium">Media</option>
-          <option value="hard">Difícil</option>
-        </select>
-      </div>
-      <div>
-        <label>Formato exportación</label>
-        <select id="exportFmt">
-          <option value="csv">CSV (Excel)</option>
-          <option value="anki">Anki (CSV front;back)</option>
-          <option value="remnote">RemNote (Markdown)</option>
-        </select>
-      </div>
+  <h2>2) Configuración</h2>
+  <div class="grid2">
+    <div>
+      <label>Dificultad</label>
+      <select id="difficulty">
+        <option value="auto">Auto (equilibrado)</option>
+        <option value="easy">Fácil</option>
+        <option value="medium">Media</option>
+        <option value="hard">Difícil</option>
+      </select>
     </div>
 
-    <div class="row" style="margin-top:12px">
-      <button id="startQuiz">Empezar Quiz</button>
-      <button class="secondary" id="reviewWrong">Revisar fallos</button>
-      <button class="secondary" id="exportDeck">Exportar</button>
+    <div>
+      <label>Reparto por temas</label>
+      <select id="distMode">
+        <option value="equal">Equitativo (mismo nº por tema)</option>
+        <option value="prop">Proporcional (según longitud)</option>
+      </select>
     </div>
-    <div class="muted" style="margin-top:8px">Tip: genera por epígrafe → exporta → repasa con espaciado.</div>
-  </section>
+
+    <div>
+      <label>Formato exportación</label>
+      <select id="exportFmt">
+        <option value="csv">CSV (Excel)</option>
+        <option value="anki">Anki (CSV front;back)</option>
+        <option value="remnote">RemNote (Markdown)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <button id="startQuiz">Empezar Quiz</button>
+    <button class="secondary" id="reviewWrong">Revisar fallos</button>
+    <button class="secondary" id="exportDeck">Exportar</button>
+  </div>
+  <div class="muted" style="margin-top:8px">Tip: genera por epígrafe → exporta → repasa con espaciado.</div>
+</section>
 
   <section class="panel" style="grid-column:1 / -1">
     <div class="flex">
@@ -152,9 +164,6 @@
 const stopwords = new Set(`a,al,algo,algunas,algunos,ante,antes,como,con,contra,cuando,De,de,del,desde,donde,durante,e,el,ella,ellas,ellos,em,bajo,hasta,la,las,lo,los,mas,más,me,mi,mí,mientras,mis,mi,mis,modo,muy,ni,no,nos,nuestro,nosotros,o,os,otra,otros,para,pero,por,porque,que,qué,quien,quién,se,sin,sobre,su,sus,te,tu,tú,tus,un,una,uno,unos,unas,ya,si,sí,ser,son,es,esta,este,esto,estas,estos,ha,han,hay,fue,eran,será,serán,también,entre,mediante,según,cada,debido`.split(',').map(s=>s.trim()));
 function seedRandom(seed){ let s = seed % 2147483647; if (s<=0) s+=2147483646; return ()=> (s = s*16807 % 2147483647)/2147483647; }
 function shuffle(arr, rnd=Math.random){ for(let i=arr.length-1;i>0;i--){ const j = Math.floor(rnd()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]];} return arr;}
-function splitSentences(text){
-  return text.replace(/\s+/g,' ').split(/(?<=[\.\?\!;:])\s+(?=[A-ZÁÉÍÓÚÑ0-9¡¿“"(\[])/g).map(s=>s.trim()).filter(s=>s.length>0);
-}
 function tokenize(s){
   return s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(w=>w && !stopwords.has(w) && w.length>2 && !/^\d+$/.test(w));
 }
@@ -170,6 +179,56 @@ function sentenceScore(sent, keyset){
 function pickN(arr, n, rnd=Math.random){ arr = arr.slice(); shuffle(arr, rnd); return arr.slice(0,n); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function setStatus(msg){ document.getElementById('status').textContent = msg; }
+
+function normTxt(s){
+  return String(s||'')
+    .replace(/^[“"'\s]+|[”"'\s]+$/g,'')
+    .replace(/\s+/g,' ')
+    .replace(/[.;,:]\s*$/,'')
+    .trim()
+    .toLowerCase();
+}
+
+// Baraja choices y remapea índices de correcta/seleccionada
+function shuffleChoicesAndMap(choices, correctIdx, selectedIdx=null){
+  if (!Array.isArray(choices)) return { choices: [], correctIdx: -1, selectedIdx: -1 };
+  const idxs = choices.map((_,i)=>i);
+  for(let i=idxs.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+  }
+  const newChoices = idxs.map(i => choices[i]);
+  const newCorrectIdx  = idxs.indexOf(correctIdx);
+  const newSelectedIdx = (selectedIdx!=null && selectedIdx>=0) ? idxs.indexOf(selectedIdx) : null;
+  return { choices: newChoices, correctIdx: newCorrectIdx, selectedIdx: newSelectedIdx };
+}
+
+
+function deduceCorrectIndex(q){
+  const choices = (q.choices||[]).map(c=>String(c));
+  // 1) Si viene answer_index válido
+  if (Number.isInteger(q.answer_index) && q.answer_index>=0 && q.answer_index<choices.length){
+    return q.answer_index;
+  }
+  // 2) Si answer es letra A-D
+  if (typeof q.answer === 'string'){
+    const a = q.answer.trim();
+    const mL = a.match(/^[A-D]\s*(?:[).:\-]\s*)?$/i);
+    if (mL){ return {A:0,B:1,C:2,D:3}[mL[0][0].toUpperCase()] ?? -1; }
+    // 3) Si answer es número 1-4 SOLO si es índice puro
+    const mN = a.match(/^[1-4]\s*(?:[).:\-]\s*)?$/);
+    if (mN){ return parseInt(mN[0],10)-1; }
+    // 4) Igual por texto (normalizado)
+    const idxEq = choices.findIndex(c => normTxt(c) === normTxt(a));
+    if (idxEq !== -1) return idxEq;
+  }
+  // 5) Si hay source_quote, intentar mapear por fuente
+  if (q.source_quote){
+    const idxSrc = choices.findIndex(c => normTxt(c) === normTxt(q.source_quote));
+    if (idxSrc !== -1) return idxSrc;
+  }
+  return -1; // fallback
+}
 
 /* ---------- Estado ---------- */
 let QUESTIONS = [];
@@ -322,7 +381,74 @@ function renderTemas(){
 
   wrap.appendChild(list);
   updateSelCount();
+  renderGroupControls();
 }
+
+// Seleccionar Temas de un grupo, o seleccionar todos
+function getGroups(){
+  const map = new Map(); // group -> array de items
+  for(const it of TEMAS){
+    if(!map.has(it.group)) map.set(it.group, []);
+    map.get(it.group).push(it);
+  }
+  return map;
+}
+
+function selectGroup(group, checked=true){
+  for(const it of TEMAS){
+    if(it.group === group){
+      if(checked) SELECCION.add(it.key);
+      else SELECCION.delete(it.key);
+    }
+  }
+  updateSelCount();
+  renderTemas();
+  renderGroupControls(); // refresca contadores
+}
+
+function selectAllInList(){
+  for(const it of TEMAS){ SELECCION.add(it.key); }
+  updateSelCount();
+  renderTemas();
+  renderGroupControls();
+}
+
+function clearAllSelection(){
+  SELECCION.clear();
+  updateSelCount();
+  renderTemas();
+  renderGroupControls();
+}
+
+function renderGroupControls(){
+  const wrap = document.getElementById('groupControls');
+  if(!wrap) return;
+  const groups = getGroups();
+
+  // Botones globales
+  let html = `
+    <button class="secondary" onclick="selectAllInList()">Seleccionar todo</button>
+    <button class="secondary warn" onclick="clearAllSelection()">Quitar todo</button>
+  `;
+
+  // Botones por grupo
+  for(const [g, items] of groups.entries()){
+    const selected = items.filter(it => SELECCION.has(it.key)).length;
+    const allSel = selected === items.length && items.length>0;
+
+    html += `
+      <span class="pill" style="margin-left:8px">${g}: ${selected}/${items.length}</span>
+      <button class="secondary" style="padding:6px 8px" onclick="selectGroup('${g.replace(/'/g,"\\'")}', true)">
+        Seleccionar ${g}
+      </button>
+      <button class="secondary" style="padding:6px 8px" onclick="selectGroup('${g.replace(/'/g,"\\'")}', false)">
+        Quitar ${g}
+      </button>
+    `;
+  }
+  wrap.innerHTML = html;
+}
+
 
 // Descarga texto plano del tema (usa /texto del Worker)
 async function fetchTextoTema(key){
@@ -363,72 +489,109 @@ document.addEventListener('DOMContentLoaded', initTemasUI);
 
 /* ---------- Generación con IA ---------- */
 async function generateAI(){
-  // --- NUEVO: trabajar solo con selección de temas ---
-  if (SELECCION.size === 0) {
-    alert("Selecciona al menos un tema.");
-    return;
-  }
-
-  // Usaremos SIEMPRE el Worker como endpoint IA
+  if (SELECCION.size === 0) { alert("Selecciona al menos un tema."); return; }
   const workerBase = getWorkerBase();
-  if (!workerBase){
-    alert("Indica la URL del Worker arriba.");
-    return;
-  }
-  const endpoint = workerBase;    // ← tu Worker hace de proxy de Gemini
-  const maxQs = parseInt(document.getElementById('maxQs').value,10)||30;
-  const perCall = 12;             // o ajusta si quieres (valor fijo)
+  if (!workerBase){ alert("Indica la URL del Worker arriba."); return; }
+  const endpoint  = workerBase;
+  const maxQs     = parseInt(document.getElementById('maxQs').value,10)||30;
+  const perCall   = 12;
+  const difficulty = document.getElementById('difficulty').value;
+  const distMode   = (document.getElementById('distMode')?.value) || 'equal';
+
   setStatus('IA: preparando…');
 
-
-  // Descarga los textos de los temas seleccionados y combínalos
   const keys = [...SELECCION];
-  let combinado = '';
+
+  // 1) Descarga texto de CADA tema (por separado)
+  const textosByKey = {};
   try{
-    const textos = await Promise.all(keys.map(k => fetchTextoTema(k).catch(e => `[ERROR ${k}]: ${e.message}`)));
-    combinado = keys.map((k,i)=> `===== ${k} =====\n${(textos[i]||'').trim()}`).join('\n\n');
+    const textos = await Promise.all(
+      keys.map(k => fetchTextoTema(k).catch(e => `[ERROR ${k}]: ${e.message}`))
+    );
+    keys.forEach((k, i) => textosByKey[k] = (textos[i]||'').trim());
   }catch(e){
     console.error(e);
-    alert('Error descargando textos de los temas: ' + e.message);
+    alert('Error descargando textos: ' + e.message);
     return;
   }
 
-  // Usa el texto combinado como fuente para chunking
-  const chunks = chunkText(combinado, 2800);
-  const allowed = ['mcq'];
-  const difficulty = document.getElementById('difficulty').value;
+  // 2) Calcula cupos por tema
+  let quotas;
+  if (distMode === 'prop'){
+    // Igual que antes
+    const weights = keys.map(k => Math.max(1, textLen(textosByKey[k])));
+    quotas = allocateCounts(maxQs, weights);
+  } else {
+    // === Reparto equitativo con resto aleatorio ===
+    const n = keys.length;
+    const base = Math.floor(maxQs / n);
+    let rem = maxQs - base * n;
+    quotas = Array(n).fill(base);
 
-  const out = [];
-  for(let i=0;i<chunks.length;i++){
-    if(out.length>=maxQs) break;
-    const need = Math.min(perCall, maxQs - out.length);
-    setStatus(`IA: generando (${i+1}/${chunks.length})...`);
-    try{
-      const qs = await callChatJSON(endpoint, null, null, buildPrompt(chunks[i], need, allowed, difficulty));
-      for(const q of qs){
-        if(q.type !== 'mcq' || !q.choices) continue;
-        const id = 'ai_'+(out.length+1);
-        out.push({
-          id,
-          type:'mcq',
-          stem:q.question,
-          sent:q.source_quote||'',
-          answer:q.answer,
-          choices:q.choices,
-          explanation:q.explanation||''
-        });
-        if(out.length>=maxQs) break;
-      }
-    } catch(e){
-      console.error(e);
-      alert("Error llamando a la IA: "+e.message);
-      break;
-    }
+    // Elige 'rem' índices al azar y suma +1 a esos temas
+    const idxs = [...keys.keys()];
+    shuffle(idxs, RNG); // ya tienes shuffle() y RNG definidos
+    for (let i = 0; i < rem; i++) quotas[idxs[i]] += 1;
   }
 
+  // 3) Genera por tema, respetando cupo y repartiendo por chunk
+  const out = [];
+  for (let t = 0; t < keys.length; t++) {
+    const key = keys[t];
+    const needForThisTopic = quotas[t];
+    if (needForThisTopic <= 0) continue;
+
+    const baseText = textosByKey[key] || '';
+    if (!baseText) continue;
+
+    // ===== Tema completo como único "chunk" =====
+    const whole = baseText;
+    let made = 0;
+    const seenStems = new Set(); // deduplicación de enunciados
+
+    while (made < needForThisTopic && out.length < maxQs) {
+      const batch = Math.min(perCall, needForThisTopic - made);
+      setStatus(`IA: «${key}» – tema completo (${made}/${needForThisTopic})…`);
+      try {
+        const qs = await callChatJSON(endpoint, null, null, buildPrompt(whole, batch, ['mcq'], difficulty));
+        for (const q of qs) {
+          if (q.type !== 'mcq' || !q.choices) continue;
+          const stemTxt = (q.stem || q.question || '').trim();
+          const normStemTxt = normTxt(stemTxt);
+          if (seenStems.has(normStemTxt)) continue; // evita duplicados entre tandas
+          seenStems.add(normStemTxt);
+          
+          const shortName = key.split('/').pop().replace(/\.pdf$/i, '');
+
+          const id = 'ai_' + (out.length + 1);
+          const correctIdx = deduceCorrectIndex(q);
+          out.push({
+            id,
+            type: 'mcq',
+            topic: key, // Tema de origen → bien para filtrar o analizar después
+            stem: q.question, // Enunciado
+            sent: `[${shortName}] ${q.source_quote || ''}`, // Fuente (si existe)
+            answer: q.answer, // Texto de la respuesta (por compatibilidad/exportar)
+            choices: q.choices, // Opciones A–D
+            explanation: q.explanation || '', // Explicación opcional
+            answer_index: q.answer_index, // Índice correcto (si lo devolvió la IA)
+            correctIdx, // Índice deducido por función
+          });
+          made++;
+          if (made >= needForThisTopic) break;
+        }
+      } catch (e) {
+        console.error(e);
+        break; // pasa al siguiente tema si esta llamada falló
+      }
+    }
+    if (out.length >= maxQs) break;
+  }
+  
   if(out.length===0){ setStatus('IA: sin resultados'); return; }
 
-  // Reset tanda y pinta
+  // 4) Mezcla las preguntas para no agrupar por tema y resetea estado
+  shuffle(out);
   QUESTIONS = out;
   CURRENT = 0; SCORE = 0; WRONG.clear();
   CORRECT = 0; INCORRECT = 0;
@@ -442,47 +605,57 @@ async function generateAI(){
 function buildPrompt(text, n, _types, difficulty){
   const mapDiff = {easy:'básico', medium:'medio', hard:'difícil', auto:'equilibrado'};
   return [
-    { "role":"system", "content":
-      "Eres un generador de preguntas tipo test (opción múltiple) para una oposición española. Crea preguntas rigurosas en español con distractores verosímiles basadas en el texto dado. Devuelve estrictamente JSON válido conforme al esquema."
+    { role:"system", content:
+      "Eres un generador de preguntas tipo test (opción múltiple) para una oposición española de ingeniería industrial. Devuelve JSON ESTRICTO y coherente con el esquema."
     },
-    { "role":"user", "content":
+    { role:"user", content:
 `Texto base:
 """${text}"""
 
-Genera EXACTAMENTE ${n} preguntas de opción múltiple (MCQ) de dificultad ${mapDiff[difficulty]||'equilibrado'}.
+Genera EXACTAMENTE ${n} preguntas MCQ de dificultad ${mapDiff[difficulty]||'equilibrado'}.
 
 Reglas:
-- 4 opciones (A–D), 1 correcta y 3 distractores plausibles y no triviales.
-- DEVUELVE "answer" como TEXTO EXACTO de la opción correcta (no letras).
-- Añade "explanation" breve y "source_quote" (≤30 palabras) del texto.
+- 4 opciones (A–D) en "choices". 1 correcta y 3 distractores pausibles y no triviales.
+- Distribuye las preguntas a lo largo de TODO el tema dado, no solo del inicio.
+- Devuelve SIEMPRE "answer_index" (0,1,2,3) señalando la opción correcta.
+- Además incluye "answer" con el TEXTO correcto (coincidiendo con choices[answer_index]).
+- Incluye "explanation" y "source_quote" (≤100 palabras) del texto.
 
-Devuelve SOLO JSON con este esquema:
+Devuelve SOLO JSON con este esquema exacto:
 {
   "questions":[
-    {"type":"mcq","question":"...","choices":["Opción A","Opción B","Opción C","Opción D"],"answer":"Texto exacto de la opción correcta","explanation":"...","source_quote":"..."}
+    {
+      "type":"mcq",
+      "question":"...",
+      "choices":["Opción A","Opción B","Opción C","Opción D"],
+      "answer_index": 2,
+      "answer":"Texto exacto de choices[2]",
+      "explanation":"...",
+      "source_quote":"..."
+    }
   ]
 }` }
   ];
 }
 
+function textLen(s){ return (s || '').length; }
 
-function chunkText(text, targetChars){
-  const parts = [];
-  let buf = [];
-  let len = 0;
-  const sents = splitSentences(text);
-  for(const s of sents){
-    if(len + s.length > targetChars && buf.length){
-      parts.push(buf.join(' '));
-      buf = [s];
-      len = s.length;
-    } else {
-      buf.push(s);
-      len += s.length;
-    }
+// Asignación por “mayores restos” para que la suma dé exactamente 'total'
+function allocateCounts(total, weights){
+  // weights: array de números >=0 (uno por tema)
+  const sum = weights.reduce((a,b)=>a+b, 0) || 1;
+  const raw = weights.map(w => (w / sum) * total);
+  const floor = raw.map(x => Math.floor(x));
+  let used = floor.reduce((a,b)=>a+b, 0);
+  const rems = raw.map((x,i)=> ({i, frac: x - floor[i]}));
+  // Baraja para romper empates de forma aleatoria
+  shuffle(rems, RNG);
+  rems.sort((a,b)=> b.frac - a.frac);
+  // reparte los que faltan a los de mayor resto
+  for(let k=0; used < total && k < rems.length; k++, used++){
+    floor[rems[k].i] += 1;
   }
-  if(buf.length) parts.push(buf.join(' '));
-  return parts;
+  return floor; // array con cupos por tema
 }
 
 async function callChatJSON(endpoint, _apiKey, model, messages){
@@ -495,37 +668,39 @@ async function callChatJSON(endpoint, _apiKey, model, messages){
   };
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, // ← sin Authorization
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+  const raw = await res.text().catch(()=> '');
   if(!res.ok){
-    const txt = await res.text().catch(()=> '');
-    throw new Error(`HTTP ${res.status}: ${txt.slice(0,200)}`);
+    throw new Error(`HTTP ${res.status}: ${raw.slice(0,500)}`);
   }
-  const data = await res.json();
+  // OpenAI-style or Gemini raw text
   let content = null;
-  if(data.choices && data.choices[0]?.message?.content){
-    content = data.choices[0].message.content;
-  } else if(data.output_text){
-    content = data.output_text;
-  } else if(data.choices && data.choices[0]?.message?.parsed){
-    return data.choices[0].message.parsed.questions || [];
-  }
-  try{
-    const obj = JSON.parse(content);
-    return obj.questions || [];
-  } catch(e){
-    const match = content && content.match(/\{[\s\S]*\}/);
-    if(match){
-      try{
-        const obj = JSON.parse(match[0]);
-        return obj.questions || [];
-      } catch(e2){}
+  try {
+    const data = JSON.parse(raw);
+    if (data?.choices?.[0]?.message?.parsed?.questions) {
+      return data.choices[0].message.parsed.questions;
     }
-    throw new Error('La IA no devolvió JSON válido.');
+    content = data?.choices?.[0]?.message?.content ?? data?.output_text ?? raw;
+  } catch {
+    content = raw || '';
   }
+  // intenta JSON directo
+  try {
+    const obj = JSON.parse(content);
+    if (Array.isArray(obj.questions)) return obj.questions;
+  } catch {}
+  // intenta extraer el primer bloque {...}
+  const match = content.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      const obj = JSON.parse(match[0]);
+      if (Array.isArray(obj.questions)) return obj.questions;
+    } catch {}
+  }
+  throw new Error('La IA no devolvió JSON válido. Vista previa: ' + String(content).slice(0,500));
 }
-
 
 /* ---------- UI Quiz ---------- */
 function updateUI(){
@@ -533,6 +708,7 @@ function updateUI(){
   document.getElementById('score').textContent = `Puntuación: ${SCORE}`;
   renderCurrent();
   updateDueBadge();
+  updateNavButtons();
 }
 
 function renderCurrent(){
@@ -552,10 +728,33 @@ function renderCurrent(){
   const div = document.createElement('div'); div.className='choices';
   q.choices.forEach((c,idx)=>{
     const btn = document.createElement('div'); btn.className='choice'; btn.textContent = (idx+1)+') '+c;
-    btn.addEventListener('click', ()=>answerMCQ(btn, c, q));
+    btn.addEventListener('click', ()=>answerMCQ(btn, c, idx, q));
     div.appendChild(btn);
   });
   card.appendChild(div);
+
+  // 👇 Reaplicar resaltado si ya estaba respondida
+  if (q.answered){
+    const btns = [...div.children];
+    // evita nuevos clics
+    btns.forEach(el => el.style.pointerEvents = 'none');
+
+    // deducir correcta
+    let goldIdx = Number.isInteger(q.correctIdx) ? q.correctIdx : -1;
+    if (goldIdx === -1) goldIdx = deduceCorrectIndex(q);
+
+    // pinta correcta en verde
+    if (goldIdx >= 0 && goldIdx < btns.length){
+      btns[goldIdx].classList.add('correct');
+      btns[goldIdx].classList.remove('wrong');
+    }
+
+    // si falló, pinta su elección en rojo
+    if (Number.isInteger(q.selectedIdx) && q.selectedIdx !== goldIdx && q.selectedIdx >= 0 && q.selectedIdx < btns.length){
+      btns[q.selectedIdx].classList.add('wrong');
+      btns[q.selectedIdx].classList.remove('correct');
+    }
+  }
 
   if(q.explanation){
     const exp = document.createElement('div'); exp.className='muted small'; exp.style.marginTop='8px';
@@ -571,91 +770,190 @@ function renderCurrent(){
   area.appendChild(card);
 }
 
+function updateNavButtons(){
+  const prev = document.getElementById('prevQ');
+  const next = document.getElementById('nextQ');
+  const n = QUESTIONS.length;
+  if (!prev || !next) return;
+  prev.disabled = (n === 0 || CURRENT === 0);
+  if (n === 0) {
+   next.disabled = true;
+   next.textContent = 'Siguiente ⟶';
+   return;
+ }
+ if (CURRENT < n - 1) {
+   next.disabled = false;
+   next.textContent = 'Siguiente ⟶';
+ } else {
+   // Última pregunta: botón activo como "Finalizar"
+   next.disabled = false;
+   next.textContent = 'Finalizar ✓';
+ }
+}
+
+
 // Convierte "A/B/C/D" o "1/2/3/4" al texto real de la opción.
 // Si ya es texto, lo deja igual.
 function getCorrectText(q){
   const choices = (q.choices||[]).map(c => String(c).trim());
   let a = String(q.answer||'').trim();
 
-  // Limpieza rápida
-  a = a.replace(/^respuesta\s*[:\-]\s*/i,'')
-       .replace(/^correcta\s*[:\-]\s*/i,'')
-       .replace(/^opci[oó]n\s*/i,'')
-       .replace(/^[-–—]\s*/,'')
-       .replace(/[“”"']/g,'')
-       .trim();
+  // Limpieza de texto de respuesta
+  a = a
+    .replace(/^respuesta\s*[:\-]\s*/i,'')
+    .replace(/^correcta\s*[:\-]\s*/i,'')
+    .replace(/^opci[oó]n\s*/i,'')
+    .replace(/^[“”"'\(\[]\s*/,'')
+    .replace(/\s*[”"'\)\]]$/,'')
+    .replace(/^[-–—]\s*/,'')
+    .trim();
 
-  // A, B, C, D
-  const L = a.match(/^[A-D](?=[).:\s]|$)/i);
-  if(L){ const idx = {A:0,B:1,C:2,D:3}[L[0].toUpperCase()]; return choices[idx] ?? a; }
+  // Si parece una fecha o número con texto detrás (ej. "4 de enero de 1977"),
+  // NO lo trates como índice
+  if (/^\d+\s+\p{L}/u.test(a)) {
+    const found = choices.find(c => c.toLowerCase() === a.toLowerCase());
+    if (found) return found;
+  }
 
-  // 1,2,3,4
-  const N = a.match(/^[1-4](?=[).:\s]|$)/);
-  if(N){ const idx = parseInt(N[0],10)-1; return choices[idx] ?? a; }
+  // Letras A–D → índice 0–3
+  const letter = a.match(/^[A-D](?=[).:\s]|$)/i);
+  if(letter){
+    const idx = {A:0,B:1,C:2,D:3}[letter[0].toUpperCase()];
+    return choices[idx] ?? a;
+  }
 
-  // "B) París" → "París"
-  const pref = a.replace(/^[A-D][).:\-\s]+/i,'').trim();
-  if (choices.includes(pref)) return pref;
+  // Números 1–4 SOLO si la cadena es solo el índice (sin texto detrás)
+  const onlyIndex = a.match(/^[1-4]\s*(?:[).:\-]\s*)?$/);
+  if (onlyIndex) {
+    const idx = parseInt(onlyIndex[0], 10) - 1;
+    return choices[idx] ?? a;
+  }
 
-  // Igual exacta por texto
+  // "B) Texto correcto" → "Texto correcto"
+  const afterLetter = a.replace(/^[A-D][).:\-\s]+/i,'').trim();
+  if (choices.includes(afterLetter)) return afterLetter;
+
+  // Igualdad exacta por texto
   const found = choices.find(c => c.toLowerCase() === a.toLowerCase());
   return found || a;
 }
 
-function answerMCQ(btn, choice, q){
-  if (q.answered) return; // ← evita puntuar dos veces
+function answerMCQ(btn, choice, idx, q){
+  if (q.answered) return; // evita doble clic
   q.answered = true;
+  q.selectedIdx = idx; // 👈 guarda lo que eligió el usuario
 
   const btns = [...btn.parentElement.children];
-  btns.forEach(el => el.classList.add('wrong'));
 
-  const gold = getCorrectText(q); // texto real de la opción correcta
-  const correct = btns.find(el => el.textContent.slice(3).trim() === gold);
+  // Deducir índice correcto
+  let goldIdx = Number.isInteger(q.correctIdx) ? q.correctIdx : -1;
+  if (goldIdx === -1) { goldIdx = deduceCorrectIndex(q); q.correctIdx = goldIdx; }
 
-  if (correct){
-    correct.classList.remove('wrong');
-    correct.classList.add('correct');
-  }
+  // Desactiva clicks en todas las opciones
+  btns.forEach(el => el.style.pointerEvents = 'none');
 
-  if (choice === gold){
-    // ✅ Respuesta correcta → +1
-    if (typeof SCORE !== 'number') SCORE = 0;
-    SCORE += 1;
-    CORRECT += 1;
-    WRONG.delete(q.id);
-    promoteSRS(q.id);
+  if (goldIdx >= 0 && goldIdx < (q.choices||[]).length){
+    const correctBtn = btns[goldIdx];
+
+    if (idx === goldIdx){
+      // ✅ Acierto: solo marcar la correcta en verde
+      if (correctBtn){
+        correctBtn.classList.add('correct');
+        correctBtn.classList.remove('wrong'); // por si acaso
+      }
+      SCORE = (typeof SCORE === 'number' ? SCORE : 0) + 1;  // ✅ Respuesta correcta → +1
+      CORRECT += 1;
+      WRONG.delete(q.id);
+      promoteSRS(q.id);
+      // Si esta pregunta venía del repositorio de fallos (o está marcada como fallo local), la borramos del remoto
+      (async () => {
+        try{
+          const base = getWorkerBase();
+          if(!base) return;
+          // Solo limpiar si realmente era un fallo previamente (de remoto o local)
+          const wasWrong = q.fromWrong || WRONG.has(q.id);
+          if(!wasWrong) return;
+          const r = await fetch(base + '/clear-wrong', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/json' },
+            body: JSON.stringify({ ids:[q.id] })
+          });
+          if (!r.ok) {
+            const txt = await r.text().catch(()=> '');
+            console.warn('clear-wrong FAIL', r.status, txt);
+          }
+        }catch(e){
+          console.warn('clear-wrong exception', e);
+        }
+      })();
+
+    } else {
+      // ❌ Fallo: mi elección en rojo + correcta en verde
+      const selectedBtn = btns[idx];
+      if (selectedBtn) {
+        selectedBtn.classList.add('wrong');
+        selectedBtn.classList.remove('correct');
+      }
+      if (correctBtn){
+        correctBtn.classList.add('correct');
+        correctBtn.classList.remove('wrong');
+      }
+      SCORE = (typeof SCORE === 'number' ? SCORE : 0) - 1/3; // ❌ Respuesta incorrecta → −1/3
+      INCORRECT += 1;
+      WRONG.add(q.id);
+      resetSRS(q.id);
+      // Enviar fallo al Worker (silencioso si falla)
+      (async () => {
+        try{
+          const base = getWorkerBase();
+          if(!base) return;
+
+          const origCorrect = (Number.isInteger(q.correctIdx) ? q.correctIdx : deduceCorrectIndex(q));
+          // 👇 Barajar una vez al guardar 
+          const { choices, correctIdx, selectedIdx } =
+            shuffleChoicesAndMap(q.choices || [], origCorrect, idx);
+
+          const payload = {
+            id: q.id,
+            topic: q.topic,
+            stem: q.stem || q.question || '',
+            choices,                 // ✅ ya barajadas
+            correctIdx,              // ✅ remapeado
+            selectedIdx,             // ✅ remapeado
+            explanation: q.explanation || '',
+            source_quote: q.sent || q.source_quote || '',
+            shuffled: true           // bandera informativa (opcional)
+          };
+
+          const r = await fetch(base + '/log-wrong', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if(!r.ok){ console.warn('log-wrong FAIL', r.status, await r.text()); }
+        }catch(e){ console.warn('log-wrong exception', e); }
+      })();
+    }
+
   } else {
-    // ❌ Respuesta incorrecta → −1/3
-    if (typeof SCORE !== 'number') SCORE = 0;
-    SCORE -= 1/3;
+    // Fallback si no podemos deducir la correcta: marca solo lo elegido en rojo
+    const selectedBtn = btns[idx];
+    if (selectedBtn) selectedBtn.classList.add('wrong');
+    SCORE = (typeof SCORE === 'number' ? SCORE : 0) - 1/3;
     INCORRECT += 1;
     WRONG.add(q.id);
     resetSRS(q.id);
+    console.warn('No se pudo deducir la opción correcta para esta pregunta.');
   }
 
-    // Bloquea más clics en las opciones
-  btns.forEach(el => el.style.pointerEvents = 'none');
-
+  // Actualiza UI y guarda
   const scoreEl = document.getElementById('score');
   if (scoreEl) scoreEl.textContent = `Puntuación: ${SCORE.toFixed(2)}`;
-
   saveState();
 }
 
+
 function normalize(s){ return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim(); }
-function answerCloze(val, q){
-  const user = normalize(val).split(',').map(x=>x.trim()).filter(Boolean);
-  const gold = normalize(q.answer).split(',').map(x=>x.trim());
-  const ok = gold.every(g=> user.some(u=>u===g));
-  if(ok){
-    SCORE += 1; WRONG.delete(q.id); promoteSRS(q.id);
-    alert('✅ Correcto');
-  } else {
-    WRONG.add(q.id); resetSRS(q.id);
-    alert(`❌ Incorrecto. Respuesta: ${q.answer}`);
-  }
-  document.getElementById('score').textContent = `Puntuación: ${SCORE}`;
-}
 
 function nextQ(){
   if(QUESTIONS.length===0) return;
@@ -687,10 +985,6 @@ function showResults(){
     `📊 Puntuación neta: ${net.toFixed(2)} / ${total}\n` +
     `📝 Nota (0–10): ${sobre10.toFixed(2)}`
   );
-
-  // Deshabilita el botón "Siguiente"
-  const next = document.getElementById('nextQ');
-  if (next) next.disabled = true;
 
   // (Opcional) Ofrece pasar directamente a "Revisar fallos"
   // document.getElementById('reviewWrong').click();
@@ -726,19 +1020,22 @@ function exportDeck(){
     out = 'tipo,pregunta,respuesta,frase\n';
     for(const q of QUESTIONS){
       const stem = q.stem || q.question || '';
-      out += `"${q.type}","${(stem).replace(/"/g,'""')}","${(q.answer||'').replace(/"/g,'""')}","${(q.sent||'').replace(/"/g,'""')}"\n`;
+      const ansText = Number.isInteger(q.correctIdx) && q.correctIdx>=0 ? q.choices[q.correctIdx] : (q.answer||'');
+      out += `"${q.type}","${(stem).replace(/"/g,'""')}","${(ansText).replace(/"/g,'""')}","${(q.sent||'').replace(/"/g,'""')}"\n`;
     }
     download('quiz_export.csv', out);
   } else if(fmt==='anki'){
     for(const q of QUESTIONS){
       const stem = q.stem || q.question || '';
-      out += `${escapeTabs(stem)}\t${escapeTabs(q.answer||q.sent||'')}\n`;
+      const ansText = Number.isInteger(q.correctIdx) && q.correctIdx>=0 ? q.choices[q.correctIdx] : (q.answer||'');
+      out += `${escapeTabs(stem)}\t${escapeTabs(ansText || q.sent || '')}\n`;
     }
     download('quiz_anki.tsv', out);
   } else {
     for(const q of QUESTIONS){
       const stem = q.stem || q.question || '';
-      out += `- **${stem}**\n  - ${q.answer||q.sent||''}\n\n`;
+      const ansText = Number.isInteger(q.correctIdx) && q.correctIdx>=0 ? q.choices[q.correctIdx] : (q.answer||'');
+      out += `- **${stem}**\n  - ${ansText || q.sent || ''}\n\n`;
     }
     download('quiz_remnote.md', out);
   }
@@ -754,10 +1051,6 @@ function download(filename, text){
 
 /* ---------- Control ---------- */
 // --- Cloudflare Temas: listeners ---
-document.getElementById('btnRefrescarTemas').addEventListener('click', ()=> listarTemas(false));
-document.getElementById('btnVaciarSeleccion').addEventListener('click', ()=>{ SELECCION.clear(); renderTemas(); });
-document.getElementById('temaFilter').addEventListener('input', renderTemas);
-
 document.getElementById('generateAI').addEventListener('click', generateAI);
 
 document.getElementById('startQuiz').addEventListener('click', ()=>{
@@ -769,12 +1062,54 @@ document.getElementById('startQuiz').addEventListener('click', ()=>{
 document.getElementById('nextQ').addEventListener('click', nextQ);
 document.getElementById('prevQ').addEventListener('click', prevQ);
 
-document.getElementById('reviewWrong').addEventListener('click', ()=>{
+document.getElementById('reviewWrong').addEventListener('click', async ()=>{
+  const base = getWorkerBase();
+  // Construye CSV de temas seleccionados (si hay)
+  const topics = [...SELECCION].join(',');
+  if (base){
+    try{
+      setStatus('Cargando fallos remotos…');
+      const url = new URL(base + '/wrong');
+      if (topics) url.searchParams.set('topics', topics);
+      url.searchParams.set('limit','300');
+      const res = await fetch(url.toString(), { method:'GET' });
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const data = await res.json();
+      const items = Array.isArray(data.items) ? data.items : [];
+      if (items.length === 0){
+        alert('No hay fallos remotos (aún).'); setStatus('Listo'); return;
+      }
+      // Transforma a tu formato QUESTIONS
+      QUESTIONS = items.map((it, i) => ({
+        id: it.id || ('wrong_'+(i+1)),
+        type: 'mcq',
+        topic: it.topic,
+        stem: it.stem,
+        sent: it.source_quote || '',
+        answer: (Array.isArray(it.choices) && Number.isInteger(it.correctIdx) ? it.choices[it.correctIdx] : ''),
+        choices: it.choices || [],
+        explanation: it.explanation || '',
+        answer_index: it.correctIdx,
+        correctIdx: it.correctIdx,
+        fromWrong: true
+      }));
+      CURRENT = 0; SCORE = 0; CORRECT = 0; INCORRECT = 0;
+      updateUI(); setStatus(`Fallos: ${QUESTIONS.length}`);
+      return;
+    }catch(e){
+      console.warn('Fallo leyendo remotos:', e);
+      // caer al local
+    }finally{
+      saveState();
+    }
+  }
+  // Fallback a fallos locales si no hay Worker o falló la lectura
   if(WRONG.size===0){ alert('No hay fallos acumulados.'); return; }
   const ids = new Set(WRONG);
   QUESTIONS = QUESTIONS.filter(q=>ids.has(q.id));
   CURRENT = 0; updateUI();
 });
+
 document.getElementById('exportDeck').addEventListener('click', exportDeck);
 
 document.addEventListener('keydown', (e)=>{
