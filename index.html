@@ -157,6 +157,34 @@
 }</code></pre>
     </details>
   </section>
+
+  <section class="panel" id="rankingPanel" style="grid-column:1 / -1">
+  <div class="flex">
+    <h2>4) Ranking de temas (remoto)</h2>
+    <div class="inline">
+      <label class="small">Ordenar por</label>
+      <select id="rankOrder">
+        <option value="acc_desc">% acierto (↓)</option>
+        <option value="acc_asc">% acierto (↑)</option>
+        <option value="ok_desc">Acertadas (↓)</option>
+        <option value="ok_asc">Acertadas (↑)</option>
+        <option value="ko_desc">Falladas (↓)</option>
+        <option value="ko_asc">Falladas (↑)</option>
+        <option value="idle_desc">Tiempo sin test (↓)</option>
+        <option value="idle_asc">Tiempo sin test (↑)</option>
+      </select>
+      <input id="rankFilter" type="text" placeholder="Filtrar por tema…" />
+      <button id="rankRefresh" class="secondary">Actualizar</button>
+      <button id="rankReset" class="secondary warn">Reset tema</button>
+    </div>
+  </div>
+
+  <div id="rankTable" style="margin-top:8px; max-height:320px; overflow:auto; border:1px solid var(--border); border-radius:10px"></div>
+  <div class="muted small" style="margin-top:6px">
+    * “Fallos activos” viene de <code>/wrong</code>. “% acierto / acertadas / falladas / tiempo sin test” vienen de <code>/history/stats</code>.
+  </div>
+</section>
+
 </main>
 
 <script>
@@ -180,6 +208,16 @@ function pickN(arr, n, rnd=Math.random){ arr = arr.slice(); shuffle(arr, rnd); r
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function setStatus(msg){ document.getElementById('status').textContent = msg; }
 
+// === mismo FNV-1a que en el Worker ===
+function fnv1a(str){
+  let h = 0x811c9dc5;
+  for (let i=0; i<str.length; i++){
+    h ^= str.charCodeAt(i);
+    h += (h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24);
+  }
+  return ('0000000' + (h>>>0).toString(16)).slice(-8);
+}
+
 function normTxt(s){
   return String(s||'')
     .replace(/^[“"'\s]+|[”"'\s]+$/g,'')
@@ -188,6 +226,38 @@ function normTxt(s){
     .trim()
     .toLowerCase();
 }
+
+// Cola local (LS) para reenviar histórico si falla
+function pushHistoryQueue(item){
+  const k='hist_queue';
+  let q=[]; try{ q=JSON.parse(localStorage.getItem(k)||'[]'); }catch{}
+  q.push(item);
+  localStorage.setItem(k, JSON.stringify(q));
+}
+
+async function flushHistoryQueue(){
+  const k='hist_queue';
+  let q=[]; try{ q=JSON.parse(localStorage.getItem(k)||'[]'); }catch{}
+  if(!q.length) return;
+  const base = getWorkerBase(); if(!base) return;
+  const rest=[];
+  for(const it of q){
+    try{
+      const r = await fetch(base + '/history/log', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify(it),
+        keepalive: true
+      });
+      if(!r.ok) rest.push(it); // si falla, lo dejamos en la cola
+    }catch{ rest.push(it); }
+  }
+  localStorage.setItem(k, JSON.stringify(rest));
+}
+
+window.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') flushHistoryQueue(); });
+window.addEventListener('beforeunload', flushHistoryQueue);
+
 
 // Baraja choices y remapea índices de correcta/seleccionada
 function shuffleChoicesAndMap(choices, correctIdx, selectedIdx=null){
@@ -202,6 +272,103 @@ function shuffleChoicesAndMap(choices, correctIdx, selectedIdx=null){
   const newSelectedIdx = (selectedIdx!=null && selectedIdx>=0) ? idxs.indexOf(selectedIdx) : null;
   return { choices: newChoices, correctIdx: newCorrectIdx, selectedIdx: newSelectedIdx };
 }
+
+// ===== RANKING REMOTO: lee /history/stats + /wrong =====
+async function fetchHistoryStats(){
+  const base = getWorkerBase(); if(!base) throw new Error('Falta URL del Worker');
+  const order = document.getElementById('rankOrder')?.value || 'acc_desc';
+  const q = document.getElementById('rankFilter')?.value || '';
+  const url = new URL(base + '/history/stats');
+  url.searchParams.set('order', order);
+  if (q) url.searchParams.set('q', q);
+  const res = await fetch(url, { method:'GET' });
+  if(!res.ok) throw new Error('HTTP '+res.status+' /history/stats');
+  const data = await res.json();
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+async function fetchWrongCountsByTopic(){
+  const base = getWorkerBase(); if(!base) return {};
+  const url = new URL(base + '/wrong'); url.searchParams.set('limit','1000');
+  const res = await fetch(url.toString(), { method:'GET' });
+  if(!res.ok) return {};
+  const data = await res.json();
+  const items = Array.isArray(data.items) ? data.items : [];
+  const map = {};
+  for(const it of items){
+    const k = it.topic || '';
+    map[k] = (map[k]||0) + 1;
+  }
+  return map;
+}
+
+async function renderRankingRemote(){
+  const wrap = document.getElementById('rankTable');
+  if(!wrap) return;
+  wrap.innerHTML = `<div class="muted small" style="padding:10px">Cargando…</div>`;
+  try{
+    const [stats, wrongMap] = await Promise.all([fetchHistoryStats(), fetchWrongCountsByTopic()]);
+    if (!stats.length){
+      wrap.innerHTML = `<div class="muted small" style="padding:10px">Sin datos históricos remotos todavía.</div>`;
+      return;
+    }
+    let html = `<table class="small" style="width:100%; border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left;padding:8px;border-bottom:1px solid var(--border)">Tema</th>
+        <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border)">% acierto</th>
+        <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border)">Acertadas</th>
+        <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border)">Falladas</th>
+        <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border)">Fallos activos</th>
+        <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border)">Tiempo sin test</th>
+      </tr></thead><tbody>`;
+    for(const r of stats){
+      const act = wrongMap[r.topic] || 0;
+      html += `<tr data-topic="${r.topic}">
+        <td style="padding:8px;border-bottom:1px solid var(--border)">${r.short}</td>
+        <td style="padding:8px;text-align:right;border-bottom:1px solid var(--border)">${r.acc_pct.toFixed(1)}%</td>
+        <td style="padding:8px;text-align:right;border-bottom:1px solid var(--border)">${r.ok}</td>
+        <td style="padding:8px;text-align:right;border-bottom:1px solid var(--border)">${r.ko}</td>
+        <td style="padding:8px;text-align:right;border-bottom:1px solid var(--border)">${act}</td>
+        <td style="padding:8px;text-align:right;border-bottom:1px solid var(--border)">${(r.idle_days==null)?'–':(r.idle_days+' días')}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+    wrap.innerHTML = html;
+
+    // selección de fila para 'Reset tema'
+    [...wrap.querySelectorAll('tbody tr')].forEach(tr=>{
+      tr.addEventListener('click', ()=>{
+        [...wrap.querySelectorAll('tbody tr')].forEach(x=> x.style.background='');
+        tr.style.background = '#0e152a';
+        wrap.setAttribute('data-selected-topic', tr.getAttribute('data-topic') || '');
+      });
+    });
+
+  }catch(e){
+    wrap.innerHTML = `<div class="danger small" style="padding:10px">Error cargando ranking remoto: ${e.message}</div>`;
+  }
+}
+
+// Listeners del ranking
+document.getElementById('rankOrder')?.addEventListener('change', renderRankingRemote);
+document.getElementById('rankFilter')?.addEventListener('input', renderRankingRemote);
+document.getElementById('rankRefresh')?.addEventListener('click', renderRankingRemote);
+document.getElementById('rankReset')?.addEventListener('click', async ()=>{
+  const wrap = document.getElementById('rankTable');
+  const topic = wrap?.getAttribute('data-selected-topic');
+  if(!topic){ alert('Selecciona un tema en la tabla.'); return; }
+  if(!confirm(`¿Reiniciar métricas remotas del tema?\n\n${topic}`)) return;
+  const base = getWorkerBase(); if(!base){ alert('Falta URL del Worker'); return; }
+  const res = await fetch(base + '/history/reset-topic', {
+    method:'POST', headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({ topic })
+  });
+  if(!res.ok){ alert('Error al resetear'); return; }
+  renderRankingRemote();
+});
+
+// Pintar ranking al cargar
+document.addEventListener('DOMContentLoaded', renderRankingRemote);
 
 
 function deduceCorrectIndex(q){
@@ -341,7 +508,6 @@ async function listarTemas(auto=false){
   }
 }
 
-
 function renderTemas(){
   const wrap = document.getElementById('temasArea');
   const filtro = (document.getElementById('temaFilter')?.value || '').toLowerCase();
@@ -448,7 +614,6 @@ function renderGroupControls(){
   }
   wrap.innerHTML = html;
 }
-
 
 // Descarga texto plano del tema (usa /texto del Worker)
 async function fetchTextoTema(key){
@@ -563,7 +728,7 @@ async function generateAI(){
           
           const shortName = key.split('/').pop().replace(/\.pdf$/i, '');
 
-          const id = 'ai_' + (out.length + 1);
+          const id = fnv1a(`${key}|${stemTxt}`);
           const correctIdx = deduceCorrectIndex(q);
           out.push({
             id,
@@ -944,7 +1109,65 @@ function answerMCQ(btn, choice, idx, q){
     WRONG.add(q.id);
     resetSRS(q.id);
     console.warn('No se pudo deducir la opción correcta para esta pregunta.');
+
+    // 👉 registra el fallo activo en remoto igualmente (sin barajar)
+    (async () => {
+      try{
+        const base = getWorkerBase(); if(!base) return;
+        const payload = {
+          id: q.id,
+          topic: q.topic,
+          stem: q.stem || q.question || '',
+          choices: q.choices || [],
+          correctIdx: -1,
+          selectedIdx: idx,
+          explanation: q.explanation || '',
+          source_quote: q.sent || q.source_quote || '',
+          shuffled: false
+        };
+        const r = await fetch(base + '/log-wrong', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if(!r.ok){ console.warn('log-wrong Fallback FAIL', r.status, await r.text()); }
+      }catch(e){ console.warn('log-wrong Fallback exception', e); }
+    })();
   }
+
+  // === Histórico remoto (acierto/fallo) — SIEMPRE, esté o no deducida la correcta
+  (async ()=>{
+    try {
+      const base = getWorkerBase(); if (!base) return;
+      const wasCorrect = (goldIdx >= 0) ? (idx === goldIdx) : false; // si no hay correcta deducible, cuenta como fallo
+      await fetch(base + '/history/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: q.topic,
+          correct: wasCorrect,
+          when: new Date().toISOString(),
+          stem_hash: (q.stem || q.question || '').slice(0,160)
+        })
+      });
+    } catch(e) {
+      console.warn('Error enviando histórico remoto', e);
+    }
+  })();
+
+  // Enviar con keepalive y, si algo falla, a la cola
+  (async ()=>{
+    try{
+      const base = getWorkerBase(); if(!base) return;
+      const r = await fetch(base + '/history/log', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify(histItem),
+        keepalive: true
+      });
+      if(!r.ok) pushHistoryQueue(histItem);
+    }catch{ pushHistoryQueue(histItem); }
+  })();
 
   // Actualiza UI y guarda
   const scoreEl = document.getElementById('score');
