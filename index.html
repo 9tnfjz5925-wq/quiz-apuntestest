@@ -659,7 +659,7 @@ async function generateAI(){
   if (!workerBase){ alert("Indica la URL del Worker arriba."); return; }
   const endpoint  = workerBase;
   const maxQs     = parseInt(document.getElementById('maxQs').value,10)||30;
-  const perCall   = 12;
+  const perCall   = Number.MAX_SAFE_INTEGER;
   const difficulty = document.getElementById('difficulty').value;
   const distMode   = (document.getElementById('distMode')?.value) || 'equal';
 
@@ -715,6 +715,7 @@ async function generateAI(){
     const seenStems = new Set(); // deduplicación de enunciados
 
     while (made < needForThisTopic && out.length < maxQs) {
+      await sleep(1100); // ~1.1s entre llamadas para no tocar el pico RPM
       const batch = Math.min(perCall, needForThisTopic - made);
       setStatus(`IA: «${key}» – tema completo (${made}/${needForThisTopic})…`);
       try {
@@ -728,8 +729,13 @@ async function generateAI(){
           
           const shortName = key.split('/').pop().replace(/\.pdf$/i, '');
 
+         // --- Deducimos la correcta y luego barajamos ---
+          const deducedIdx = deduceCorrectIndex(q);
+          const { choices, correctIdx } = shuffleChoicesAndMap(q.choices || [], deducedIdx);
+          q.choices = choices;
+          q.correctIdx = correctIdx;
+
           const id = fnv1a(`${key}|${stemTxt}`);
-          const correctIdx = deduceCorrectIndex(q);
           out.push({
             id,
             type: 'mcq',
@@ -781,7 +787,7 @@ Genera EXACTAMENTE ${n} preguntas MCQ de dificultad ${mapDiff[difficulty]||'equi
 
 Reglas:
 - 4 opciones (A–D) en "choices". 1 correcta y 3 distractores pausibles y no triviales.
-- Distribuye las preguntas a lo largo de TODO el tema dado, no solo del inicio.
+- Distribuye las preguntas a lo largo de TODO el tema dado.
 - Devuelve SIEMPRE "answer_index" (0,1,2,3) señalando la opción correcta.
 - Además incluye "answer" con el TEXTO correcto (coincidiendo con choices[answer_index]).
 - Incluye "explanation" y "source_quote" (≤100 palabras) del texto.
@@ -824,48 +830,80 @@ function allocateCounts(total, weights){
 }
 
 async function callChatJSON(endpoint, _apiKey, model, messages){
-  // El Worker ignora "model"; recibe {messages} y devuelve estilo OpenAI
-  const body = {
-    model: model || "gemini-2.5-flash",
-    messages,
-    temperature: 0.2,
-    response_format: {"type":"json_object"}
-  };
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  const raw = await res.text().catch(()=> '');
-  if(!res.ok){
-    throw new Error(`HTTP ${res.status}: ${raw.slice(0,500)}`);
-  }
-  // OpenAI-style or Gemini raw text
-  let content = null;
-  try {
-    const data = JSON.parse(raw);
-    if (data?.choices?.[0]?.message?.parsed?.questions) {
-      return data.choices[0].message.parsed.questions;
+  const MAX_RETRIES = 5;
+  let attempt = 0;
+
+  while (true){
+    const body = {
+      model: model || "gemini-2.5-pro", // usa Pro explícitamente
+      messages,
+      temperature: 0.2,
+      // OpenAI-style hint (no lo usa Gemini, pero no molesta)
+      response_format: {"type":"json_object"}
+    };
+
+    let res, raw = "";
+    try{
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      raw = await res.text().catch(()=> '');
+    }catch(e){
+      if (attempt >= MAX_RETRIES) throw new Error('Network error: ' + (e?.message||e));
+      const delay = 800 * Math.pow(2, attempt) + Math.random()*200;
+      await new Promise(r=>setTimeout(r, delay));
+      attempt++; 
+      continue;
     }
-    content = data?.choices?.[0]?.message?.content ?? data?.output_text ?? raw;
-  } catch {
-    content = raw || '';
-  }
-  // intenta JSON directo
-  try {
-    const obj = JSON.parse(content);
-    if (Array.isArray(obj.questions)) return obj.questions;
-  } catch {}
-  // intenta extraer el primer bloque {...}
-  const match = content.match(/\{[\s\S]*\}/);
-  if (match) {
+
+    // Si rate limit / pico RPM o 5xx → backoff y reintento
+    if (!res.ok) {
+      const status = res.status;
+      const isRetryable = status === 429 || status === 408 || (status >= 500 && status < 600) ||
+                          /rate limit|peak request|exceeded|exhausted/i.test(raw);
+      if (isRetryable && attempt < MAX_RETRIES){
+        const delay = 1000 * Math.pow(2, attempt) + Math.random()*300;
+        await new Promise(r=>setTimeout(r, delay));
+        attempt++;
+        continue;
+      }
+      throw new Error(`HTTP ${status}: ${raw.slice(0,500)}`);
+    }
+
+    // Parse estilo OpenAI o Gemini
+    let content = null;
     try {
-      const obj = JSON.parse(match[0]);
+      const data = JSON.parse(raw);
+      if (data?.choices?.[0]?.message?.parsed?.questions) {
+        return data.choices[0].message.parsed.questions;
+      }
+      content = data?.choices?.[0]?.message?.content ?? data?.output_text ?? raw;
+    } catch {
+      content = raw || '';
+    }
+
+    // intenta JSON directo
+    try {
+      const obj = JSON.parse(content);
       if (Array.isArray(obj.questions)) return obj.questions;
     } catch {}
+
+    // intenta extraer el primer bloque {...}
+    const match = content.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        const obj = JSON.parse(match[0]);
+        if (Array.isArray(obj.questions)) return obj.questions;
+      } catch {}
+    }
+    // Si llega aquí, probablemente el modelo no devolvió JSON
+    // — puede ocurrir si el Worker no fuerza JSON mode.
+    throw new Error('La IA no devolvió JSON válido. Vista previa: ' + String(content).slice(0,500));
   }
-  throw new Error('La IA no devolvió JSON válido. Vista previa: ' + String(content).slice(0,500));
 }
+
 
 /* ---------- UI Quiz ---------- */
 function updateUI(){
