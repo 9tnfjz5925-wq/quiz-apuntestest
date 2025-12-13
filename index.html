@@ -837,7 +837,7 @@ async function callChatJSON(endpoint, _apiKey, model, messages){
 
   while (true){
     const body = {
-      model: model || "gemini-live-2.5-flash-preview", // usa flash explícitamente
+      model: model || "gemma-3-27b-it", // usa flash explícitamente
       messages,
       temperature: 0.2,
       // OpenAI-style hint (no lo usa Gemini, pero no molesta)
