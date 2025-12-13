@@ -753,6 +753,8 @@ async function generateAI(){
         }
       } catch (e) {
         console.error(e);
+        setStatus(`IA: error en ${key}: ${e.message}`);
+        alert(`Error IA en ${key}:\n\n${e.message}`);
         break; // pasa al siguiente tema si esta llamada falló
       }
     }
