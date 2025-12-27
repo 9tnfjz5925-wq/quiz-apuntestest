@@ -120,7 +120,7 @@
   </div>
 
   <div class="row" style="margin-top:12px">
-    <button id="startQuiz">Empezar Quiz</button>
+    <button id="practiceBank">Practicar desde banco</button>
     <button class="secondary" id="reviewWrong">Revisar fallos</button>
     <button class="secondary" id="exportDeck">Exportar</button>
   </div>
@@ -421,6 +421,73 @@ function loadState(){
   updateDueBadge();
 }
 
+// Devuelve N preguntas priorizando nunca respondidas y luego más tiempo sin responder
+function pickFromBank(items, n){
+  const st = loadBankLocalStats();
+  const scored = (items || []).map(q => {
+    const rec = st[q.id];
+    const last = rec?.last || 0;   // 0 = nunca
+    return { q, last };
+  });
+
+  // Orden: nunca respondidas (last=0) primero; luego menor last (más antiguo) primero
+  scored.sort((a,b) => (a.last - b.last));
+
+  return scored.slice(0, n).map(x => x.q);
+}
+
+async function loadFromBankAndStart(){
+  const base = getWorkerBase();
+  if(!base){ alert("Indica la URL del Worker arriba."); return; }
+
+  const maxQs = parseInt(document.getElementById('maxQs').value,10) || 30;
+  setStatus("Banco: cargando…");
+
+  // ✅ 1) PIDE AL WORKER LA BATERÍA YA PRIORIZADA
+  const url = new URL(base + "/bank/pick");
+  url.searchParams.set("n", String(maxQs));
+
+  // si hay selección de temas, se la pasas al Worker para que filtre allí
+  const topics = [...SELECCION].join(",");
+  if (topics) url.searchParams.set("topics", topics);
+
+  const res = await fetch(url.toString(), { method: "GET" });
+  if(!res.ok){
+    setStatus("Banco: error");
+    alert("Error leyendo banco/pick: HTTP " + res.status);
+    return;
+  }
+
+  const data = await res.json().catch(()=> ({}));
+  const picked = Array.isArray(data.items) ? data.items : [];
+
+  if(!picked.length){
+    setStatus("Banco: vacío");
+    alert("No hay preguntas en el banco (o el filtro por temas deja 0).");
+    return;
+  }
+
+  // ✅ 2) Pasa a formato QUESTIONS
+  QUESTIONS = picked.map((q, i) => ({
+    id: q.id || ("bank_" + (i+1)),
+    type: "mcq",
+    topic: q.topic || "",
+    stem: q.stem || "",
+    sent: q.source_quote || "",
+    choices: q.choices || [],
+    explanation: q.explanation || "",
+    correctIdx: Number.isInteger(q.correctIdx) ? q.correctIdx : (Number.isInteger(q.answer_index) ? q.answer_index : -1),
+    fromBank: true
+  }));
+
+  CURRENT = 0; SCORE = 0; CORRECT = 0; INCORRECT = 0;
+  WRONG.clear();
+
+  updateUI();
+  saveState();
+  setStatus(`Banco: listo (${QUESTIONS.length})`);
+}
+
 // ====== Selección de temas vía Cloudflare ======
 let TEMAS = [];                // [{key, name, group}]
 let SELECCION = new Set();     // keys seleccionadas (p.ej. "GrupoII/GII T01 ....pdf")
@@ -652,6 +719,41 @@ function initTemasUI(){
 
 document.addEventListener('DOMContentLoaded', initTemasUI);
 
+async function saveToBank(items){
+  const base = getWorkerBase();
+  if(!base) return;
+
+  // Guardamos solo campos "banco" para no meter ruido (answered, selectedIdx, etc.)
+  const payloadItems = (items || []).map(q => ({
+    id: q.id,                  // si viene, perfecto; si no, el Worker lo calcula
+    topic: q.topic || "",
+    stem: q.stem || q.question || "",
+    choices: q.choices || [],
+    correctIdx: Number.isInteger(q.correctIdx) ? q.correctIdx : null,
+    explanation: q.explanation || "",
+    source_quote: q.source_quote || q.sent || ""
+  }));
+
+  try{
+    const r = await fetch(base + "/bank/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: payloadItems })
+    });
+
+    // opcional: log silencioso
+    if(!r.ok){
+      console.warn("bank/add FAIL", r.status, await r.text().catch(()=> ""));
+    } else {
+      const j = await r.json().catch(()=> ({}));
+      console.log("bank/add OK", j); // {ok, added, skipped}
+    }
+  }catch(e){
+    console.warn("bank/add exception", e);
+  }
+}
+
+
 /* ---------- Generación con IA ---------- */
 async function generateAI(){
   if (SELECCION.size === 0) { alert("Selecciona al menos un tema."); return; }
@@ -740,12 +842,13 @@ async function generateAI(){
             id,
             type: 'mcq',
             topic: key, // Tema de origen → bien para filtrar o analizar después
-            stem: q.question, // Enunciado
+            stem: stemTxt, // Enunciado
             sent: `[${shortName}] ${q.source_quote || ''}`, // Fuente (si existe)
             answer: q.answer, // Texto de la respuesta (por compatibilidad/exportar)
             choices: q.choices, // Opciones A–D
             explanation: q.explanation || '', // Explicación opcional
-            answer_index: q.answer_index, // Índice correcto (si lo devolvió la IA)
+            answer_index: correctIdx,              // 👈 ya barajado (coherente)
+            answer: (choices[correctIdx] ?? q.answer), // 👈 texto correcto coherente
             correctIdx, // Índice deducido por función
           });
           made++;
@@ -753,8 +856,6 @@ async function generateAI(){
         }
       } catch (e) {
         console.error(e);
-        setStatus(`IA: error en ${key}: ${e.message}`);
-        alert(`Error IA en ${key}:\n\n${e.message}`);
         break; // pasa al siguiente tema si esta llamada falló
       }
     }
@@ -772,6 +873,7 @@ async function generateAI(){
 
   updateUI();
   saveState();
+  saveToBank(out); // ✅ NUEVO: guarda automáticamente en GitHub
   setStatus('IA: listo');
 }
 
@@ -832,12 +934,12 @@ function allocateCounts(total, weights){
 }
 
 async function callChatJSON(endpoint, _apiKey, model, messages){
-  const MAX_RETRIES = 5;
+  const MAX_RETRIES = 2;
   let attempt = 0;
 
   while (true){
     const body = {
-      model: model || "gemma-3-27b-it", // usa flash explícitamente
+      model: model || "gemma-3-27b-it", // usa gemma explícitamente
       messages,
       temperature: 0.2,
       // OpenAI-style hint (no lo usa Gemini, pero no molesta)
@@ -863,8 +965,7 @@ async function callChatJSON(endpoint, _apiKey, model, messages){
     // Si rate limit / pico RPM o 5xx → backoff y reintento
     if (!res.ok) {
       const status = res.status;
-      const isRetryable = status === 429 || status === 408 || (status >= 500 && status < 600) ||
-                          /rate limit|peak request|exceeded|exhausted/i.test(raw);
+      const isRetryable = status === 429 || status === 408 || (status >= 500 && status < 600);
       if (isRetryable && attempt < MAX_RETRIES){
         const delay = 1000 * Math.pow(2, attempt) + Math.random()*300;
         await new Promise(r=>setTimeout(r, delay));
@@ -1043,6 +1144,38 @@ function getCorrectText(q){
   return found || a;
 }
 
+async function markBankRemote(q, wasCorrect, selectedIdx, goldIdx){
+  const base = getWorkerBase();
+  if(!base) return;
+
+  // solo si la pregunta viene del banco
+  if(!q?.fromBank || !q?.id) return;
+
+  const payload = {
+    id: q.id,
+    topic: q.topic || "",
+    when: new Date().toISOString(),
+    correct: !!wasCorrect,
+    selectedIdx: Number.isInteger(selectedIdx) ? selectedIdx : null,
+    correctIdx: Number.isInteger(goldIdx) ? goldIdx : null
+  };
+
+  try{
+    const r = await fetch(base + "/bank/mark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true
+    });
+    if(!r.ok){
+      // no rompas UX: solo log
+      console.warn("bank/mark FAIL", r.status, await r.text().catch(()=> ""));
+    }
+  }catch(e){
+    console.warn("bank/mark exception", e);
+  }
+}
+
 function answerMCQ(btn, choice, idx, q){
   if (q.answered) return; // evita doble clic
   q.answered = true;
@@ -1054,6 +1187,15 @@ function answerMCQ(btn, choice, idx, q){
   let goldIdx = Number.isInteger(q.correctIdx) ? q.correctIdx : -1;
   if (goldIdx === -1) { goldIdx = deduceCorrectIndex(q); q.correctIdx = goldIdx; }
 
+  // ✅ calcula una vez
+  const wasCorrect = (goldIdx >= 0) ? (idx === goldIdx) : false;
+
+  // ✅ captura si ERA un fallo ANTES de modificar WRONG
+  const cameFromWrong = !!q.fromWrong || WRONG.has(q.id);
+
+  // ✅ guarda en banco remoto (solo si q.fromBank)
+  markBankRemote(q, wasCorrect, idx, goldIdx);
+
   // Desactiva clicks en todas las opciones
   btns.forEach(el => el.style.pointerEvents = 'none');
 
@@ -1061,23 +1203,20 @@ function answerMCQ(btn, choice, idx, q){
     const correctBtn = btns[goldIdx];
 
     if (idx === goldIdx){
-      // ✅ Acierto: solo marcar la correcta en verde
       if (correctBtn){
         correctBtn.classList.add('correct');
-        correctBtn.classList.remove('wrong'); // por si acaso
+        correctBtn.classList.remove('wrong');
       }
-      SCORE = (typeof SCORE === 'number' ? SCORE : 0) + 1;  // ✅ Respuesta correcta → +1
+      SCORE = (typeof SCORE === 'number' ? SCORE : 0) + 1;
       CORRECT += 1;
       WRONG.delete(q.id);
       promoteSRS(q.id);
-      // Si esta pregunta venía del repositorio de fallos (o está marcada como fallo local), la borramos del remoto
+
       (async () => {
         try{
           const base = getWorkerBase();
           if(!base) return;
-          // Solo limpiar si realmente era un fallo previamente (de remoto o local)
-          const wasWrong = q.fromWrong || WRONG.has(q.id);
-          if(!wasWrong) return;
+          if (!cameFromWrong) return;
           const r = await fetch(base + '/clear-wrong', {
             method:'POST',
             headers:{ 'Content-Type':'application/json' },
@@ -1093,7 +1232,6 @@ function answerMCQ(btn, choice, idx, q){
       })();
 
     } else {
-      // ❌ Fallo: mi elección en rojo + correcta en verde
       const selectedBtn = btns[idx];
       if (selectedBtn) {
         selectedBtn.classList.add('wrong');
@@ -1103,31 +1241,30 @@ function answerMCQ(btn, choice, idx, q){
         correctBtn.classList.add('correct');
         correctBtn.classList.remove('wrong');
       }
-      SCORE = (typeof SCORE === 'number' ? SCORE : 0) - 1/3; // ❌ Respuesta incorrecta → −1/3
+      SCORE = (typeof SCORE === 'number' ? SCORE : 0) - 1/3;
       INCORRECT += 1;
       WRONG.add(q.id);
       resetSRS(q.id);
-      // Enviar fallo al Worker (silencioso si falla)
+
       (async () => {
         try{
           const base = getWorkerBase();
           if(!base) return;
 
           const origCorrect = (Number.isInteger(q.correctIdx) ? q.correctIdx : deduceCorrectIndex(q));
-          // 👇 Barajar una vez al guardar 
           const { choices, correctIdx, selectedIdx } =
-            shuffleChoicesAndMap(q.choices || [], origCorrect, idx);
+            shuffleChoicesAndMap(q.choices || [], goldIdx, idx);
 
           const payload = {
             id: q.id,
             topic: q.topic,
             stem: q.stem || q.question || '',
-            choices,                 // ✅ ya barajadas
-            correctIdx,              // ✅ remapeado
-            selectedIdx,             // ✅ remapeado
+            choices,
+            correctIdx,
+            selectedIdx,
             explanation: q.explanation || '',
-            source_quote: q.sent || q.source_quote || '',
-            shuffled: true           // bandera informativa (opcional)
+            source_quote: q.source_quote || q.sent || '',
+            shuffled: true
           };
 
           const r = await fetch(base + '/log-wrong', {
@@ -1141,7 +1278,6 @@ function answerMCQ(btn, choice, idx, q){
     }
 
   } else {
-    // Fallback si no podemos deducir la correcta: marca solo lo elegido en rojo
     const selectedBtn = btns[idx];
     if (selectedBtn) selectedBtn.classList.add('wrong');
     SCORE = (typeof SCORE === 'number' ? SCORE : 0) - 1/3;
@@ -1150,7 +1286,6 @@ function answerMCQ(btn, choice, idx, q){
     resetSRS(q.id);
     console.warn('No se pudo deducir la opción correcta para esta pregunta.');
 
-    // 👉 registra el fallo activo en remoto igualmente (sin barajar)
     (async () => {
       try{
         const base = getWorkerBase(); if(!base) return;
@@ -1175,11 +1310,10 @@ function answerMCQ(btn, choice, idx, q){
     })();
   }
 
-  // === Histórico remoto (acierto/fallo) — SIEMPRE, esté o no deducida la correcta
+  // === Histórico remoto (acierto/fallo)
   (async ()=>{
     try {
       const base = getWorkerBase(); if (!base) return;
-      const wasCorrect = (goldIdx >= 0) ? (idx === goldIdx) : false; // si no hay correcta deducible, cuenta como fallo
       await fetch(base + '/history/log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1187,7 +1321,8 @@ function answerMCQ(btn, choice, idx, q){
           topic: q.topic,
           correct: wasCorrect,
           when: new Date().toISOString(),
-          stem_hash: (q.stem || q.question || '').slice(0,160)
+          stem_hash: fnv1a(q.stem || q.question || '')
+
         })
       });
     } catch(e) {
@@ -1195,26 +1330,11 @@ function answerMCQ(btn, choice, idx, q){
     }
   })();
 
-  // Enviar con keepalive y, si algo falla, a la cola
-  (async ()=>{
-    try{
-      const base = getWorkerBase(); if(!base) return;
-      const r = await fetch(base + '/history/log', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify(histItem),
-        keepalive: true
-      });
-      if(!r.ok) pushHistoryQueue(histItem);
-    }catch{ pushHistoryQueue(histItem); }
-  })();
-
   // Actualiza UI y guarda
   const scoreEl = document.getElementById('score');
   if (scoreEl) scoreEl.textContent = `Puntuación: ${SCORE.toFixed(2)}`;
   saveState();
 }
-
 
 function normalize(s){ return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim(); }
 
@@ -1315,13 +1435,6 @@ function download(filename, text){
 /* ---------- Control ---------- */
 // --- Cloudflare Temas: listeners ---
 document.getElementById('generateAI').addEventListener('click', generateAI);
-
-document.getElementById('startQuiz').addEventListener('click', ()=>{
-  CURRENT = 0; SCORE = 0; WRONG.clear();
-  CORRECT = 0; INCORRECT = 0;
-  const next = document.getElementById('nextQ'); if(next) next.disabled = false;
-  updateUI();
-});
 document.getElementById('nextQ').addEventListener('click', nextQ);
 document.getElementById('prevQ').addEventListener('click', prevQ);
 
@@ -1374,6 +1487,8 @@ document.getElementById('reviewWrong').addEventListener('click', async ()=>{
 });
 
 document.getElementById('exportDeck').addEventListener('click', exportDeck);
+
+document.getElementById('practiceBank').addEventListener('click', loadFromBankAndStart);
 
 document.addEventListener('keydown', (e)=>{
   if(e.key>='1' && e.key<='5'){
