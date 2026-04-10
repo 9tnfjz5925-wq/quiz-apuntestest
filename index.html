@@ -42,6 +42,12 @@
   .danger{color:var(--danger)}
   @media (max-width: 980px){ main{grid-template-columns:1fr;}; }
   code{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:12px; color:#dbe8f5}
+  .detailsBox{background:#0e152a;border:1px dashed var(--border);border-radius:10px;padding:8px;margin-top:10px;color:#c8d4e3;}
+  .detailsBox > summary{cursor:pointer;user-select:none;font-weight:700;color:var(--text);}
+  .detailsBox > summary::-webkit-details-marker{ display:none; }
+  .detailsBox > summary::before{content:"▸"; display:inline-block;margin-right:8px;transition: transform .15s ease;color: var(--muted);}
+  .detailsBox[open] > summary::before{transform: rotate(90deg);}
+
 </style>
 </head>
 <body>
@@ -441,51 +447,112 @@ async function loadFromBankAndStart(){
   if(!base){ alert("Indica la URL del Worker arriba."); return; }
 
   const maxQs = parseInt(document.getElementById('maxQs').value,10) || 30;
+  const distMode = (document.getElementById('distMode')?.value) || 'equal';
+  const keys = [...SELECCION];
+
   setStatus("Banco: cargando…");
 
-  // ✅ 1) PIDE AL WORKER LA BATERÍA YA PRIORIZADA
-  const url = new URL(base + "/bank/pick");
-  url.searchParams.set("n", String(maxQs));
-
-  // si hay selección de temas, se la pasas al Worker para que filtre allí
-  const topics = [...SELECCION].join(",");
-  if (topics) url.searchParams.set("topics", topics);
-
-  const res = await fetch(url.toString(), { method: "GET" });
-  if(!res.ok){
-    setStatus("Banco: error");
-    alert("Error leyendo banco/pick: HTTP " + res.status);
-    return;
+  // Si no hay temas seleccionados → comportamiento actual (1 llamada)
+  if (keys.length === 0){
+    const url = new URL(base + "/bank/pick");
+    url.searchParams.set("n", String(maxQs));
+    const res = await fetch(url.toString(), { method: "GET" });
+    if(!res.ok){ setStatus("Banco: error"); alert("HTTP " + res.status); return; }
+    const data = await res.json().catch(()=> ({}));
+    return startQuizFromPicked(Array.isArray(data.items) ? data.items : []);
   }
 
-  const data = await res.json().catch(()=> ({}));
-  const picked = Array.isArray(data.items) ? data.items : [];
-
-  if(!picked.length){
-    setStatus("Banco: vacío");
-    alert("No hay preguntas en el banco (o el filtro por temas deja 0).");
-    return;
+  // 1) calcular cupos por tema
+  let quotas = [];
+  if (distMode === 'prop'){
+    // Proporcional: sin longitud real, aproximamos por "stock disponible" (si Worker no lo expone)
+    // → fallback simple: equitativo. (Si quieres proporcional real, te digo cómo con un endpoint /bank/stats)
+    const n = keys.length;
+    const baseQ = Math.floor(maxQs / n);
+    let rem = maxQs - baseQ * n;
+    quotas = Array(n).fill(baseQ);
+    const idxs = [...keys.keys()];
+    shuffle(idxs, RNG);
+    for (let i=0;i<rem;i++) quotas[idxs[i]] += 1;
+  } else {
+    // Equitativo
+    const n = keys.length;
+    const baseQ = Math.floor(maxQs / n);
+    let rem = maxQs - baseQ * n;
+    quotas = Array(n).fill(baseQ);
+    const idxs = [...keys.keys()];
+    shuffle(idxs, RNG);
+    for (let i=0;i<rem;i++) quotas[idxs[i]] += 1;
   }
 
-  // ✅ 2) Pasa a formato QUESTIONS
-  QUESTIONS = picked.map((q, i) => ({
-    id: q.id || ("bank_" + (i+1)),
-    type: "mcq",
-    topic: q.topic || "",
-    stem: q.stem || "",
-    sent: q.source_quote || "",
-    choices: q.choices || [],
-    explanation: q.explanation || "",
-    correctIdx: Number.isInteger(q.correctIdx) ? q.correctIdx : (Number.isInteger(q.answer_index) ? q.answer_index : -1),
-    fromBank: true
-  }));
+  // 2) pedir al Worker por tema y mezclar
+  const pickedAll = [];
+  for (let i=0;i<keys.length;i++){
+    const topic = keys[i];
+    const need = quotas[i];
+    if (need <= 0) continue;
 
-  CURRENT = 0; SCORE = 0; CORRECT = 0; INCORRECT = 0;
-  WRONG.clear();
+    const url = new URL(base + "/bank/pick");
+    url.searchParams.set("n", String(need));
+    url.searchParams.append("topics", topic); // 👈 una sola topic por llamada
 
-  updateUI();
-  saveState();
-  setStatus(`Banco: listo (${QUESTIONS.length})`);
+    const res = await fetch(url.toString(), { method: "GET" });
+    if(!res.ok){
+      console.warn("bank/pick FAIL", res.status, topic);
+      continue;
+    }
+    const data = await res.json().catch(()=> ({}));
+    const items = Array.isArray(data.items) ? data.items : [];
+    pickedAll.push(...items);
+  }
+
+  // 3) Si algún tema no tenía stock y nos quedamos cortos, rellena con el conjunto seleccionado
+  if (pickedAll.length < maxQs){
+    const faltan = maxQs - pickedAll.length;
+    const url = new URL(base + "/bank/pick");
+    url.searchParams.set("n", String(faltan));
+    // aquí sí pasamos todos para rellenar de donde haya
+    for (const k of keys) url.searchParams.append("topics", k);
+    const res = await fetch(url.toString(), { method: "GET" });
+    if(res.ok){
+      const data = await res.json().catch(()=> ({}));
+      const items = Array.isArray(data.items) ? data.items : [];
+      pickedAll.push(...items);
+    }
+  }
+
+  // 4) mezcla final para no agrupar por tema
+  shuffle(pickedAll);
+
+  return startQuizFromPicked(pickedAll);
+
+  // === helper: igual que tu mapeo actual ===
+  function startQuizFromPicked(picked){
+    if(!picked.length){
+      setStatus("Banco: vacío");
+      alert("No hay preguntas en el banco (o el filtro por temas deja 0).");
+      return;
+    }
+
+    QUESTIONS = picked.map((q, i) => ({
+      id: q.id || ("bank_" + (i+1)),
+      type: "mcq",
+      topic: q.topic || "",
+      stem: q.stem || "",
+      sent: q.source_quote || "",
+      choices: q.choices || [],
+      explanation: q.explanation || "",
+      correctIdx: Number.isInteger(q.correctIdx) ? q.correctIdx : (Number.isInteger(q.answer_index) ? q.answer_index : -1),
+      fromBank: true
+    }));
+
+    CURRENT = 0; SCORE = 0; CORRECT = 0; INCORRECT = 0;
+    WRONG.clear();
+
+    updateUI();
+    saveState();
+    setStatus(`Banco: listo (${QUESTIONS.length})`);
+  }
 }
 
 // ====== Selección de temas vía Cloudflare ======
@@ -1062,15 +1129,33 @@ function renderCurrent(){
     }
   }
 
-  if(q.explanation){
-    const exp = document.createElement('div'); exp.className='muted small'; exp.style.marginTop='8px';
-    exp.textContent = 'Explicación: ' + q.explanation;
-    card.appendChild(exp);
-  }
-  if(q.sent){
-    const src = document.createElement('div'); src.className='muted small'; src.style.marginTop='4px';
-    src.textContent = 'Fuente: ' + q.sent;
-    card.appendChild(src);
+    // 👇 Explicación + fuente en desplegable (oculto por defecto)
+  if (q.explanation || q.sent){
+    const det = document.createElement('details');
+    det.className = 'detailsBox';
+    det.open = false;
+
+    const sum = document.createElement('summary');
+    sum.textContent = 'Ver explicación y fuente';
+    det.appendChild(sum);
+
+    if (q.explanation){
+      const exp = document.createElement('div');
+      exp.className = 'muted small';
+      exp.style.marginTop = '8px';
+      exp.textContent = 'Explicación: ' + q.explanation;
+      det.appendChild(exp);
+    }
+
+    if (q.sent){
+      const src = document.createElement('div');
+      src.className = 'muted small';
+      src.style.marginTop = '4px';
+      src.textContent = 'Fuente: ' + q.sent;
+      det.appendChild(src);
+    }
+
+    card.appendChild(det);
   }
 
   area.appendChild(card);
@@ -1333,6 +1418,11 @@ function answerMCQ(btn, choice, idx, q){
   // Actualiza UI y guarda
   const scoreEl = document.getElementById('score');
   if (scoreEl) scoreEl.textContent = `Puntuación: ${SCORE.toFixed(2)}`;
+
+  // abre el desplegable de explicación/fuente tras responder
+  const det = document.querySelector('#quizArea details.detailsBox');
+  if (det) det.open = true;
+
   saveState();
 }
 
@@ -1440,24 +1530,93 @@ document.getElementById('prevQ').addEventListener('click', prevQ);
 
 document.getElementById('reviewWrong').addEventListener('click', async ()=>{
   const base = getWorkerBase();
-  // Construye CSV de temas seleccionados (si hay)
-  const topics = [...SELECCION].join(',');
+  const keys = [...SELECCION];
+  const maxQs = parseInt(document.getElementById('maxQs').value, 10) || 30;
+  const distMode = (document.getElementById('distMode')?.value) || 'equal';
+
   if (base){
     try{
       setStatus('Cargando fallos remotos…');
       const url = new URL(base + '/wrong');
-      if (topics) url.searchParams.set('topics', topics);
-      url.searchParams.set('limit','300');
-      const res = await fetch(url.toString(), { method:'GET' });
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      const data = await res.json();
-      const items = Array.isArray(data.items) ? data.items : [];
-      if (items.length === 0){
-        alert('No hay fallos remotos (aún).'); setStatus('Listo'); return;
+
+      for (const topic of keys) {
+        url.searchParams.append('topics', topic);
       }
-      // Transforma a tu formato QUESTIONS
+
+      // pedimos un margen amplio para luego repartir en cliente
+      url.searchParams.set('limit', String(Math.max(300, maxQs * 10)));
+
+      const res = await fetch(url.toString(), { method:'GET' });
+      if(!res.ok) throw new Error('HTTP ' + res.status);
+
+      const data = await res.json();
+      let items = Array.isArray(data.items) ? data.items : [];
+
+      if (items.length === 0){
+        alert('No hay fallos remotos (aún).');
+        setStatus('Listo');
+        return;
+      }
+
+      // Si no hay temas seleccionados, simplemente limita a maxQs
+      if (keys.length === 0) {
+        items = items.slice(0, maxQs);
+      } else {
+        // Agrupar por tema
+        const byTopic = new Map();
+        for (const k of keys) byTopic.set(k, []);
+        for (const it of items) {
+          const t = it.topic || '';
+          if (!byTopic.has(t)) byTopic.set(t, []);
+          byTopic.get(t).push(it);
+        }
+
+        // Calcular cupos
+        let quotas = [];
+        if (distMode === 'prop') {
+          // proporcional al nº de fallos disponibles por tema
+          const weights = keys.map(k => (byTopic.get(k)?.length || 0));
+          quotas = allocateCounts(maxQs, weights);
+        } else {
+          // equitativo
+          const n = keys.length;
+          const baseQ = Math.floor(maxQs / n);
+          let rem = maxQs - baseQ * n;
+          quotas = Array(n).fill(baseQ);
+          const idxs = [...keys.keys()];
+          shuffle(idxs, RNG);
+          for (let i = 0; i < rem; i++) quotas[idxs[i]] += 1;
+        }
+
+        // Primera pasada: coger por cupos
+        const picked = [];
+        const leftovers = [];
+
+        for (let i = 0; i < keys.length; i++) {
+          const topic = keys[i];
+          const need = quotas[i];
+          const arr = byTopic.get(topic) || [];
+
+          picked.push(...arr.slice(0, need));
+          leftovers.push(...arr.slice(need));
+        }
+
+        // Relleno si algún tema no tenía suficientes
+        if (picked.length < maxQs && leftovers.length) {
+          picked.push(...leftovers.slice(0, maxQs - picked.length));
+        }
+
+        items = picked.slice(0, maxQs);
+      }
+
+      if (items.length === 0){
+        alert('No hay suficientes fallos para esa selección.');
+        setStatus('Listo');
+        return;
+      }
+
       QUESTIONS = items.map((it, i) => ({
-        id: it.id || ('wrong_'+(i+1)),
+        id: it.id || ('wrong_' + (i+1)),
         type: 'mcq',
         topic: it.topic,
         stem: it.stem,
@@ -1469,9 +1628,16 @@ document.getElementById('reviewWrong').addEventListener('click', async ()=>{
         correctIdx: it.correctIdx,
         fromWrong: true
       }));
-      CURRENT = 0; SCORE = 0; CORRECT = 0; INCORRECT = 0;
-      updateUI(); setStatus(`Fallos: ${QUESTIONS.length}`);
+
+      CURRENT = 0;
+      SCORE = 0;
+      CORRECT = 0;
+      INCORRECT = 0;
+
+      updateUI();
+      setStatus(`Fallos: ${QUESTIONS.length}`);
       return;
+
     }catch(e){
       console.warn('Fallo leyendo remotos:', e);
       // caer al local
@@ -1479,11 +1645,28 @@ document.getElementById('reviewWrong').addEventListener('click', async ()=>{
       saveState();
     }
   }
-  // Fallback a fallos locales si no hay Worker o falló la lectura
-  if(WRONG.size===0){ alert('No hay fallos acumulados.'); return; }
+
+  // Fallback local
+  if(WRONG.size === 0){
+    alert('No hay fallos acumulados.');
+    return;
+  }
+
   const ids = new Set(WRONG);
-  QUESTIONS = QUESTIONS.filter(q=>ids.has(q.id));
-  CURRENT = 0; updateUI();
+  let localItems = QUESTIONS.filter(q => ids.has(q.id));
+
+  if (keys.length > 0) {
+    localItems = localItems.filter(q => keys.includes(q.topic));
+  }
+
+  localItems = localItems.slice(0, maxQs);
+
+  QUESTIONS = localItems;
+  CURRENT = 0;
+  SCORE = 0;
+  CORRECT = 0;
+  INCORRECT = 0;
+  updateUI();
 });
 
 document.getElementById('exportDeck').addEventListener('click', exportDeck);
