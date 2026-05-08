@@ -170,6 +170,8 @@
     <div class="inline">
       <label class="small">Ordenar por</label>
       <select id="rankOrder">
+        <option value="name_asc">Nombre (A–Z)</option>
+        <option value="name_desc">Nombre (Z–A)</option>
         <option value="acc_desc">% acierto (↓)</option>
         <option value="acc_asc">% acierto (↑)</option>
         <option value="ok_desc">Acertadas (↓)</option>
@@ -449,84 +451,84 @@ async function loadFromBankAndStart(){
   const maxQs = parseInt(document.getElementById('maxQs').value,10) || 30;
   const distMode = (document.getElementById('distMode')?.value) || 'equal';
   const keys = [...SELECCION];
+  const btn = document.getElementById('practiceBank');
 
+  if (btn) btn.disabled = true;
   setStatus("Banco: cargando…");
 
-  // Si no hay temas seleccionados → comportamiento actual (1 llamada)
-  if (keys.length === 0){
-    const url = new URL(base + "/bank/pick");
-    url.searchParams.set("n", String(maxQs));
-    const res = await fetch(url.toString(), { method: "GET" });
-    if(!res.ok){ setStatus("Banco: error"); alert("HTTP " + res.status); return; }
-    const data = await res.json().catch(()=> ({}));
-    return startQuizFromPicked(Array.isArray(data.items) ? data.items : []);
-  }
+  try {
+    // Caso sin temas seleccionados: una sola llamada
+    if (keys.length === 0){
+      const url = new URL(base + "/bank/pick");
+      url.searchParams.set("n", String(maxQs));
 
-  // 1) calcular cupos por tema
-  let quotas = [];
-  if (distMode === 'prop'){
-    // Proporcional: sin longitud real, aproximamos por "stock disponible" (si Worker no lo expone)
-    // → fallback simple: equitativo. (Si quieres proporcional real, te digo cómo con un endpoint /bank/stats)
+      const data = await fetchJSONWithTimeout(url.toString());
+      return startQuizFromPicked(Array.isArray(data.items) ? data.items : []);
+    }
+
+    // 1) calcular cupos por tema
+    let quotas = [];
     const n = keys.length;
     const baseQ = Math.floor(maxQs / n);
     let rem = maxQs - baseQ * n;
     quotas = Array(n).fill(baseQ);
     const idxs = [...keys.keys()];
     shuffle(idxs, RNG);
-    for (let i=0;i<rem;i++) quotas[idxs[i]] += 1;
-  } else {
-    // Equitativo
-    const n = keys.length;
-    const baseQ = Math.floor(maxQs / n);
-    let rem = maxQs - baseQ * n;
-    quotas = Array(n).fill(baseQ);
-    const idxs = [...keys.keys()];
-    shuffle(idxs, RNG);
-    for (let i=0;i<rem;i++) quotas[idxs[i]] += 1;
-  }
+    for (let i = 0; i < rem; i++) quotas[idxs[i]] += 1;
 
-  // 2) pedir al Worker por tema y mezclar
-  const pickedAll = [];
-  for (let i=0;i<keys.length;i++){
-    const topic = keys[i];
-    const need = quotas[i];
-    if (need <= 0) continue;
+    // 2) pedir al Worker por lotes (no todos los temas a la vez)
+    const results = await fetchBankPickByTopicInBatches(base, keys, quotas, 5);
 
-    const url = new URL(base + "/bank/pick");
-    url.searchParams.set("n", String(need));
-    url.searchParams.append("topics", topic); // 👈 una sola topic por llamada
-
-    const res = await fetch(url.toString(), { method: "GET" });
-    if(!res.ok){
-      console.warn("bank/pick FAIL", res.status, topic);
-      continue;
+    console.log("=== BANK PICK POR TEMA ===");
+    for (const r of results) {
+    console.log({
+        topic: r.topic,
+        pedido: r.need,
+        recibidas: r.items.length,
+        error: r.error
+    });
     }
-    const data = await res.json().catch(()=> ({}));
-    const items = Array.isArray(data.items) ? data.items : [];
-    pickedAll.push(...items);
-  }
 
-  // 3) Si algún tema no tenía stock y nos quedamos cortos, rellena con el conjunto seleccionado
-  if (pickedAll.length < maxQs){
-    const faltan = maxQs - pickedAll.length;
-    const url = new URL(base + "/bank/pick");
-    url.searchParams.set("n", String(faltan));
-    // aquí sí pasamos todos para rellenar de donde haya
-    for (const k of keys) url.searchParams.append("topics", k);
-    const res = await fetch(url.toString(), { method: "GET" });
-    if(res.ok){
-      const data = await res.json().catch(()=> ({}));
-      const items = Array.isArray(data.items) ? data.items : [];
-      pickedAll.push(...items);
+    let pickedAll = results.flatMap(r => r.items);
+
+    // 3) si faltan preguntas, rellena con todos los temas seleccionados
+    if (pickedAll.length < maxQs){
+      const faltan = maxQs - pickedAll.length;
+      const url = new URL(base + "/bank/pick");
+      url.searchParams.set("n", String(faltan));
+      for (const k of keys) url.searchParams.append("topics", k);
+
+      try {
+        const data = await fetchJSONWithTimeout(url.toString());
+        const extra = Array.isArray(data.items) ? data.items : [];
+        pickedAll.push(...extra);
+      } catch (e) {
+        console.warn("bank/pick refill FAIL", e);
+      }
     }
+
+    // 4) quitar duplicados por id
+    const seen = new Set();
+    pickedAll = pickedAll.filter(q => {
+      const id = String(q?.id || "");
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+
+    // 5) mezcla final
+    shuffle(pickedAll);
+
+    return startQuizFromPicked(pickedAll.slice(0, maxQs));
+
+  } catch (e) {
+    console.error("loadFromBankAndStart ERROR", e);
+    setStatus("Banco: error");
+    alert("Error cargando desde banco: " + (e?.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
   }
 
-  // 4) mezcla final para no agrupar por tema
-  shuffle(pickedAll);
-
-  return startQuizFromPicked(pickedAll);
-
-  // === helper: igual que tu mapeo actual ===
   function startQuizFromPicked(picked){
     if(!picked.length){
       setStatus("Banco: vacío");
@@ -542,11 +544,16 @@ async function loadFromBankAndStart(){
       sent: q.source_quote || "",
       choices: q.choices || [],
       explanation: q.explanation || "",
-      correctIdx: Number.isInteger(q.correctIdx) ? q.correctIdx : (Number.isInteger(q.answer_index) ? q.answer_index : -1),
+      correctIdx: Number.isInteger(q.correctIdx)
+        ? q.correctIdx
+        : (Number.isInteger(q.answer_index) ? q.answer_index : -1),
       fromBank: true
     }));
 
-    CURRENT = 0; SCORE = 0; CORRECT = 0; INCORRECT = 0;
+    CURRENT = 0;
+    SCORE = 0;
+    CORRECT = 0;
+    INCORRECT = 0;
     WRONG.clear();
 
     updateUI();
@@ -588,6 +595,66 @@ async function fetchJSONWithRetry(url, {retries=3, baseDelay=400} = {}){
     }
   }
   throw lastErr || new Error('Network error');
+}
+
+async function fetchJSONWithTimeout(url, timeoutMs = 15000){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${txt}`);
+    }
+
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchBankPickByTopicInBatches(base, keys, quotas, batchSize = 5){
+  const results = [];
+
+  for (let start = 0; start < keys.length; start += batchSize){
+    const batchPromises = keys.slice(start, start + batchSize).map((topic, localIdx) => {
+      const i = start + localIdx;
+      const need = quotas[i];
+
+      if (need <= 0) {
+        return Promise.resolve({ topic, need, items: [], error: null });
+      }
+
+      const url = new URL(base + "/bank/pick");
+      url.searchParams.set("n", String(need));
+      url.searchParams.append("topics", topic);
+
+      return fetchJSONWithTimeout(url.toString(), 15000)
+        .then(data => ({
+          topic,
+          need,
+          items: Array.isArray(data.items) ? data.items : [],
+          error: null
+        }))
+        .catch(err => ({
+          topic,
+          need,
+          items: [],
+          error: String(err?.message || err)
+        }));
+    });
+
+    const batchResults = await Promise.all(batchPromises);
+    results.push(...batchResults);
+  }
+
+  return results;
 }
 
 function saveTemasCache(base, items){
